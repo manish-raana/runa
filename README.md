@@ -45,6 +45,21 @@ runa run --name worker --cmd "python3 worker.py" -e REDIS_URL=localhost:6379 -e 
 runa status
 ```
 
+### Watch local ports in a TUI
+```bash
+# TCP listeners by default
+runa watch
+
+# Include UDP sockets
+runa watch --udp
+
+# Start with a filter
+runa watch --filter api
+
+```
+
+TUI controls: click or arrow keys to select, scroll to move, `/` filter, `t` sort, `u` toggle UDP, `s` stop selected process, `R` restart Runa process, `o` logs/details, `c` copy details, `K` kill selected PID.
+
 ### View logs
 ```bash
 # View existing logs

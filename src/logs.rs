@@ -1,11 +1,10 @@
-use tokio::io::{AsyncBufReadExt, BufReader, AsyncWriteExt, AsyncSeekExt};
-use tokio::process::{ChildStderr, ChildStdout};
-use std::sync::Arc;
-use tokio::fs::{OpenOptions, File};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStderr, ChildStdout};
 use tokio::time::sleep;
-use chrono;
 
 use crate::error::Result;
 
@@ -19,7 +18,7 @@ impl LogHandler {
         let stderr_path = log_dir.join(format!("{}.err.log", prefix));
         let _ = std::fs::remove_file(stdout_path);
         let _ = std::fs::remove_file(stderr_path);
-        
+
         // Also remove rotation files
         let _ = std::fs::remove_file(log_dir.join(format!("{}.out.log.bak", prefix)));
         let _ = std::fs::remove_file(log_dir.join(format!("{}.err.log.bak", prefix)));
@@ -40,16 +39,16 @@ impl LogHandler {
                 let timestamp = now.format("%Y-%m-%d %H:%M:%S").to_string();
                 let formatted = format!("[{}] [{}] {}\n", timestamp, prefix, line);
                 print!("{}", formatted);
-                
+
                 if let Some(f) = file.as_mut() {
-                    if let Ok(metadata) = f.metadata().await {
-                        if metadata.len() > LOG_SIZE_THRESHOLD {
-                            // Rotate
-                            let _ = Self::rotate_log(&log_file_path).await;
-                            file = Self::open_log_file(&log_file_path).await;
-                        }
+                    if let Ok(metadata) = f.metadata().await
+                        && metadata.len() > LOG_SIZE_THRESHOLD
+                    {
+                        // Rotate
+                        let _ = Self::rotate_log(&log_file_path).await;
+                        file = Self::open_log_file(&log_file_path).await;
                     }
-                    
+
                     if let Some(f) = file.as_mut() {
                         let _ = f.write_all(formatted.as_bytes()).await;
                     }
@@ -73,16 +72,16 @@ impl LogHandler {
                 let timestamp = now.format("%Y-%m-%d %H:%M:%S").to_string();
                 let formatted = format!("[{}] [{}] {}\n", timestamp, prefix, line);
                 eprint!("{}", formatted);
-                
+
                 if let Some(f) = file.as_mut() {
-                    if let Ok(metadata) = f.metadata().await {
-                        if metadata.len() > LOG_SIZE_THRESHOLD {
-                            // Rotate
-                            let _ = Self::rotate_log(&log_file_path).await;
-                            file = Self::open_log_file(&log_file_path).await;
-                        }
+                    if let Ok(metadata) = f.metadata().await
+                        && metadata.len() > LOG_SIZE_THRESHOLD
+                    {
+                        // Rotate
+                        let _ = Self::rotate_log(&log_file_path).await;
+                        file = Self::open_log_file(&log_file_path).await;
                     }
-                    
+
                     if let Some(f) = file.as_mut() {
                         let _ = f.write_all(formatted.as_bytes()).await;
                     }
@@ -125,7 +124,7 @@ impl LogHandler {
             if len > pos {
                 let mut file = File::open(&path).await?;
                 file.seek(std::io::SeekFrom::Start(pos)).await?;
-                
+
                 let mut reader = BufReader::new(file);
                 let mut line = String::new();
                 while reader.read_line(&mut line).await? > 0 {

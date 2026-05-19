@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::fs;
 use crate::error::{Result, RunaError};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ProcessStatus {
@@ -12,12 +12,20 @@ pub enum ProcessStatus {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProcessMetadata {
+    #[serde(default = "current_schema_version")]
+    pub schema_version: u32,
     pub name: String,
-    pub pid: i32, // Supervisor PID
+    pub pid: i32,               // Supervisor PID
     pub child_pid: Option<i32>, // Task PID
     pub cmd: String,
     pub status: ProcessStatus,
     pub created_at: u64,
+    #[serde(default)]
+    pub restart_count: u64,
+    #[serde(default)]
+    pub last_exit_code: Option<i32>,
+    #[serde(default)]
+    pub last_exit_at: Option<u64>,
 }
 
 pub struct StateManager {
@@ -26,9 +34,10 @@ pub struct StateManager {
 
 impl StateManager {
     pub fn new() -> Result<Self> {
-        let home = std::env::var("HOME").map_err(|_| RunaError::State("HOME not set".to_string()))?;
+        let home =
+            std::env::var("HOME").map_err(|_| RunaError::State("HOME not set".to_string()))?;
         let run_dir = Path::new(&home).join(".runa");
-        
+
         if !run_dir.exists() {
             fs::create_dir_all(&run_dir)?;
         }
@@ -41,8 +50,8 @@ impl StateManager {
     }
 
     pub fn save_process(&self, meta: &ProcessMetadata) -> Result<()> {
-        let file_path = self.run_dir.join(format!("{}.json", meta.name));
-        
+        let file_path = self.process_path(&meta.name);
+
         // Safety: never save invalid PIDs
         if meta.pid <= 1 {
             return Err(RunaError::State(format!("Invalid PID: {}", meta.pid)));
@@ -51,7 +60,8 @@ impl StateManager {
         // In v0.1, we want to prevent starting a process if it's already "Running"
         if let Ok(existing) = self.get_process(&meta.name) {
             // Check if the supervisor process is actually alive AND it's not us
-            let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(existing.pid as i32), None).is_ok();
+            let alive =
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(existing.pid), None).is_ok();
             if alive && existing.pid != meta.pid {
                 return Err(RunaError::ProcessAlreadyExists(meta.name.clone()));
             }
@@ -59,25 +69,27 @@ impl StateManager {
 
         let content = serde_json::to_string_pretty(meta)
             .map_err(|e| RunaError::State(format!("Serialization error: {}", e)))?;
-        fs::write(file_path, content)?;
+        let tmp_path = file_path.with_extension("json.tmp");
+        fs::write(&tmp_path, content)?;
+        fs::rename(tmp_path, file_path)?;
         Ok(())
     }
 
     pub fn get_process(&self, name: &str) -> Result<ProcessMetadata> {
-        let file_path = self.run_dir.join(format!("{}.json", name));
+        let file_path = self.process_path(name);
         if !file_path.exists() {
             return Err(RunaError::ProcessNotFound(name.to_string()));
         }
-        
+
         let content = fs::read_to_string(file_path)?;
         let meta: ProcessMetadata = serde_json::from_str(&content)
             .map_err(|e| RunaError::State(format!("Deserialization error: {}", e)))?;
-        
+
         Ok(meta)
     }
 
     pub fn remove_process(&self, name: &str) -> Result<()> {
-        let file_path = self.run_dir.join(format!("{}.json", name));
+        let file_path = self.process_path(name);
         if file_path.exists() {
             fs::remove_file(file_path)?;
         }
@@ -86,11 +98,11 @@ impl StateManager {
 
     pub fn list_processes(&self) -> Result<Vec<ProcessMetadata>> {
         let mut processes = Vec::new();
-        
+
         for entry in fs::read_dir(&self.run_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             // Skip if not a file or not .json
             if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
@@ -108,7 +120,45 @@ impl StateManager {
                 }
             }
         }
-        
+
         Ok(processes)
+    }
+
+    fn process_path(&self, name: &str) -> PathBuf {
+        self.run_dir
+            .join(format!("{}.json", sanitize_process_name(name)))
+    }
+}
+
+fn current_schema_version() -> u32 {
+    1
+}
+
+pub fn sanitize_process_name(name: &str) -> String {
+    let mut sanitized = String::new();
+    for byte in name.bytes() {
+        let c = byte as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            sanitized.push(c);
+        } else {
+            sanitized.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_process_name;
+
+    #[test]
+    fn sanitizes_process_names_for_filenames() {
+        assert_eq!(sanitize_process_name("api"), "api");
+        assert_eq!(sanitize_process_name("../api worker"), "..%2Fapi%20worker");
+        assert_eq!(sanitize_process_name(""), "_");
     }
 }

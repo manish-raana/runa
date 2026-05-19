@@ -75,6 +75,21 @@ pub enum Commands {
 
     /// List all processes
     Status,
+
+    /// Watch local ports in a live terminal dashboard
+    Watch {
+        /// Refresh interval in milliseconds
+        #[arg(long, default_value_t = 1000)]
+        interval: u64,
+
+        /// Include UDP sockets
+        #[arg(long)]
+        udp: bool,
+
+        /// Initial text filter
+        #[arg(long)]
+        filter: Option<String>,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]

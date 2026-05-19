@@ -1,14 +1,14 @@
 use crate::cli::RestartPolicy;
+use crate::error::Result;
 use crate::logs::LogHandler;
 use crate::process::ProcessManager;
 use crate::state::{ProcessMetadata, ProcessStatus, StateManager};
-use crate::error::Result;
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::process::Child;
 use tokio::signal;
 use tokio::time::sleep;
-use std::collections::HashMap;
-use tokio::process::Child;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 pub struct Supervisor {
     name: String,
@@ -17,6 +17,9 @@ pub struct Supervisor {
     env_vars: HashMap<String, String>,
     state_manager: StateManager,
 }
+
+const INITIAL_RESTART_DELAY: Duration = Duration::from_secs(1);
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
 
 impl Supervisor {
     pub fn new(
@@ -38,22 +41,31 @@ impl Supervisor {
     pub async fn run(&mut self) -> Result<()> {
         let supervisor_pid = std::process::id() as i32;
         info!(name = %self.name, pid = supervisor_pid, "Supervisor starting...");
-        
+
         let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
         let mut sighup = signal::unix::signal(signal::unix::SignalKind::hangup()).unwrap();
 
         // Clear logs when the supervisor starts (Truncate policy)
         LogHandler::clear_logs(&self.name, self.state_manager.get_run_dir());
+        let created_at = unix_now();
+        let mut restart_count = 0;
+        let mut restart_delay = INITIAL_RESTART_DELAY;
+        let mut last_exit_code = None;
+        let mut last_exit_at = None;
 
         loop {
             // Register process state
             let mut meta = ProcessMetadata {
+                schema_version: 1,
                 name: self.name.clone(),
                 pid: supervisor_pid,
                 child_pid: None,
                 cmd: self.cmd.clone(),
                 status: ProcessStatus::Running,
-                created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                created_at,
+                restart_count,
+                last_exit_code,
+                last_exit_at,
             };
             self.state_manager.save_process(&meta)?;
 
@@ -73,7 +85,7 @@ impl Supervisor {
                 meta.child_pid = Some(child_pid as i32);
                 let _ = self.state_manager.save_process(&meta);
             }
-            
+
             // Setup logging
             let log_dir = self.state_manager.get_run_dir();
             if let Some(stdout) = child.stdout.take() {
@@ -114,19 +126,26 @@ impl Supervisor {
             } else {
                 warn!(name = %self.name, code = status.code(), "Process exited with error");
             }
-            
+            last_exit_code = status.code();
+            last_exit_at = Some(unix_now());
+            self.update_exit_metadata(last_exit_code, last_exit_at.unwrap())?;
+
             match self.restart_policy {
                 RestartPolicy::Always => {
-                    info!(name = %self.name, "Restarting in 1 second (Policy: Always)...");
+                    restart_count += 1;
+                    info!(name = %self.name, delay_ms = restart_delay.as_millis(), "Restarting (Policy: Always)...");
                     self.update_status(ProcessStatus::Running)?;
-                    sleep(Duration::from_secs(1)).await;
+                    sleep(restart_delay).await;
+                    restart_delay = next_restart_delay(restart_delay);
                     continue;
                 }
                 RestartPolicy::OnFailure => {
                     if !status.success() {
-                        info!(name = %self.name, "Restarting in 1 second (Policy: OnFailure)...");
+                        restart_count += 1;
+                        info!(name = %self.name, delay_ms = restart_delay.as_millis(), "Restarting (Policy: OnFailure)...");
                         self.update_status(ProcessStatus::Running)?;
-                        sleep(Duration::from_secs(1)).await;
+                        sleep(restart_delay).await;
+                        restart_delay = next_restart_delay(restart_delay);
                         continue;
                     } else {
                         info!(name = %self.name, "Process completed successfully, not restarting.");
@@ -141,7 +160,7 @@ impl Supervisor {
                 }
             }
         }
-        
+
         self.cleanup()?;
         Ok(())
     }
@@ -155,10 +174,13 @@ impl Supervisor {
             }
 
             info!(name = %self.name, child_pid = pid, group_id = pgid, "Sending SIGTERM to process group...");
-            
+
             // Send SIGTERM to the process group (negative PID)
-            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pgid), nix::sys::signal::Signal::SIGTERM);
-            
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-pgid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+
             let timeout = sleep(Duration::from_secs(5));
             tokio::select! {
                 _ = child.wait() => {
@@ -180,8 +202,28 @@ impl Supervisor {
         Ok(())
     }
 
+    fn update_exit_metadata(&self, exit_code: Option<i32>, exit_at: u64) -> Result<()> {
+        if let Ok(mut meta) = self.state_manager.get_process(&self.name) {
+            meta.last_exit_code = exit_code;
+            meta.last_exit_at = Some(exit_at);
+            self.state_manager.save_process(&meta)?;
+        }
+        Ok(())
+    }
+
     fn cleanup(&self) -> Result<()> {
         info!(name = %self.name, "Cleaning up process state...");
         self.state_manager.remove_process(&self.name)
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn next_restart_delay(current: Duration) -> Duration {
+    (current * 2).min(MAX_RESTART_DELAY)
 }
