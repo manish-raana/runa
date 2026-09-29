@@ -16,6 +16,9 @@ pub enum RunaError {
 
     #[error("Invalid command: {0}")]
     InvalidCommand(String),
+
+    #[error("Failed to run '{0}': {1}")]
+    Spawn(String, std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, RunaError>;

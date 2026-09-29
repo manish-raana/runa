@@ -522,6 +522,8 @@ mod tests {
             restart_count: 0,
             last_exit_code: None,
             last_exit_at: None,
+            cwd: None,
+            last_error: None,
         }];
 
         let pid_map = build_runa_pid_map(&processes);

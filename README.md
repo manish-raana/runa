@@ -72,11 +72,59 @@ runa stop api
 
 Leave out `--detach` to run in the foreground. Output then streams to your terminal, and <kbd>Ctrl</kbd>+<kbd>C</kbd> shuts the process down cleanly.
 
+## Project files (`runa.toml`)
+
+Put a `runa.toml` in your project and start the whole stack with one command:
+
+```toml
+[processes.api]
+cmd = "bun run index.ts"
+cwd = "./api"
+env = { PORT = 3000 }
+env_file = ".env"
+
+[processes.worker]
+cmd = "python3 worker.py"
+restart = "on-failure"
+```
+
+```console
+$ runa up
+  api     started (PID 4120)
+  worker  started (PID 4123)
+
+$ runa down
+  api     stopped
+  worker  stopped
+```
+
+- `runa up` starts every process in the file in the background. Processes that are already running are skipped. If any process fails to start, `runa up` says why and exits with an error.
+- `runa down` stops the processes in the file and waits until they have exited. Runa processes that aren't in the file are left alone.
+- To act on some processes only, name them: `runa up api`, `runa down worker`.
+- `runa init` creates a commented starter `runa.toml`.
+- Use `-f path/to/runa.toml` to point at a different file.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `cmd` | *required* | The command to run. It's split with shell-style quoting, like `--cmd`. |
+| `cwd` | the file's directory | Working directory, relative to `runa.toml` |
+| `restart` | `always` | `always`, `on-failure` or `never` |
+| `env` | none | Extra environment variables. Numbers and booleans are allowed. |
+| `env_file` | none | A dotenv file to load, relative to `runa.toml` |
+
+Each process gets your shell's environment, then the `env_file` variables, then the `env` table. Later sources win when a name repeats. These values are passed to the process through its environment, never on its command line, so they don't show up in `ps`.
+
+> [!NOTE]
+> Process names are global on your machine. If another project already has a process running under the same name, `runa up` reports the conflict instead of starting a second copy, and `runa down` won't stop the other project's process.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `runa run --name <name> --cmd "<command>"` | Start and supervise a process |
+| `runa up [names…]` | Start the processes in `runa.toml` |
+| `runa down [names…]` | Stop the processes in `runa.toml` and wait for them to exit |
+| `runa init` | Create a starter `runa.toml` |
 | `runa status` | List tracked processes with PID, status, ports and start time |
 | `runa logs <name> [--follow]` | Print a process's logs, or follow them live |
 | `runa restart <name>` | Gracefully restart the process |

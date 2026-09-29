@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "runa")]
@@ -76,6 +77,29 @@ pub enum Commands {
     /// List all processes
     Status,
 
+    /// Start the processes defined in runa.toml
+    Up {
+        /// Processes to start (default: all)
+        names: Vec<String>,
+
+        /// Config file (default: ./runa.toml)
+        #[arg(long, short = 'f')]
+        file: Option<PathBuf>,
+    },
+
+    /// Stop the processes defined in runa.toml
+    Down {
+        /// Processes to stop (default: all)
+        names: Vec<String>,
+
+        /// Config file (default: ./runa.toml)
+        #[arg(long, short = 'f')]
+        file: Option<PathBuf>,
+    },
+
+    /// Create a runa.toml template in the current directory
+    Init,
+
     /// Watch local ports in a live terminal dashboard
     Watch {
         /// Refresh interval in milliseconds
@@ -92,9 +116,20 @@ pub enum Commands {
     },
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RestartPolicy {
     Always,
     OnFailure,
     Never,
+}
+
+impl RestartPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::OnFailure => "on-failure",
+            Self::Never => "never",
+        }
+    }
 }

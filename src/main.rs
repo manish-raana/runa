@@ -1,4 +1,6 @@
 mod cli;
+mod config;
+mod control;
 mod error;
 mod logs;
 mod ports;
@@ -7,6 +9,7 @@ mod state;
 mod supervisor;
 mod tui;
 
+use crate::control::{StartOutcome, StopOutcome};
 use crate::logs::LogHandler;
 use crate::state::StateManager;
 use crate::supervisor::Supervisor;
@@ -15,7 +18,7 @@ use clap::Parser;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
-use std::process::Stdio;
+use std::path::Path;
 use tracing::Level;
 
 fn main() -> Result<()> {
@@ -44,9 +47,7 @@ fn main() -> Result<()> {
                 // report an already-running name here where the user sees it.
                 let state_manager =
                     StateManager::new().context("Failed to initialize state manager")?;
-                if let Ok(existing) = state_manager.get_process(&name)
-                    && state::is_runa_supervisor(existing.pid)
-                {
+                if let Some(existing) = control::running_process(&state_manager, &name) {
                     anyhow::bail!(
                         "Process '{}' is already running (PID: {})",
                         name,
@@ -54,37 +55,26 @@ fn main() -> Result<()> {
                     );
                 }
 
-                let exe =
-                    std::env::current_exe().context("Failed to get current executable path")?;
-                let mut command = std::process::Command::new(exe);
-                // Use --flag=value so values starting with '-' aren't parsed as flags.
-                command
-                    .arg("run")
-                    .arg(format!("--name={}", name))
-                    .arg(format!("--cmd={}", cmd))
-                    .arg(format!(
-                        "--restart={}",
-                        match restart {
-                            cli::RestartPolicy::Always => "always",
-                            cli::RestartPolicy::OnFailure => "on-failure",
-                            cli::RestartPolicy::Never => "never",
-                        }
-                    ))
-                    .arg("--internal-supervisor");
-
-                for e in &env {
-                    command.arg(format!("--env={}", e));
+                match control::spawn_detached(
+                    &state_manager,
+                    &name,
+                    &cmd,
+                    restart,
+                    &env,
+                    None,
+                    &HashMap::new(),
+                )? {
+                    StartOutcome::Started { .. } => {
+                        println!("Process '{}' started in background.", name)
+                    }
+                    StartOutcome::Exited => println!(
+                        "Process '{}' started and exited right away. See `runa logs {}`.",
+                        name, name
+                    ),
+                    StartOutcome::Failed(reason) => {
+                        anyhow::bail!("Process '{}' failed to start: {}", name, reason)
+                    }
                 }
-
-                // Redirect to avoid keeping terminal open
-                command.stdin(Stdio::null());
-                command.stdout(Stdio::null());
-                command.stderr(Stdio::null());
-
-                command
-                    .spawn()
-                    .context("Failed to spawn background supervisor")?;
-                println!("Process '{}' started in background.", name);
                 return Ok(());
             }
 
@@ -93,7 +83,6 @@ fn main() -> Result<()> {
         cli::Commands::Stop { name, all } => {
             let state_manager =
                 StateManager::new().context("Failed to initialize state manager")?;
-            let my_pid = std::process::id() as i32;
 
             if all {
                 let processes = state_manager
@@ -103,48 +92,37 @@ fn main() -> Result<()> {
                     println!("No processes to stop.");
                 } else {
                     for p in processes {
-                        if p.pid <= 1 || p.pid == my_pid {
-                            continue;
-                        }
-
-                        if state::is_runa_supervisor(p.pid) {
-                            println!("Stopping process '{}' (PID: {})...", p.name, p.pid);
-                            let _ = signal::kill(Pid::from_raw(p.pid), Signal::SIGTERM);
-                        } else {
-                            println!(
+                        match control::request_stop(&state_manager, &p.name) {
+                            Ok(StopOutcome::Signalled { pid }) => {
+                                println!("Stopping process '{}' (PID: {})...", p.name, pid)
+                            }
+                            Ok(StopOutcome::WasDead) => println!(
                                 "Process '{}' (PID: {}) is already dead. Cleaning up...",
                                 p.name, p.pid
-                            );
-                            let _ = state_manager.remove_process(&p.name);
+                            ),
+                            Ok(StopOutcome::NotFound) => {}
+                            Err(err) => eprintln!("Failed to stop '{}': {:#}", p.name, err),
                         }
                     }
                     println!("Stop all command issued.");
                 }
             } else if let Some(name) = name {
-                let meta = state_manager
-                    .get_process(&name)
-                    .context(format!("Process '{}' not found", name))?;
-                if meta.pid <= 1 || meta.pid == my_pid {
-                    anyhow::bail!("Invalid PID {} for process '{}'", meta.pid, name);
-                }
-
-                if state::is_runa_supervisor(meta.pid) {
-                    println!("Stopping process '{}' (PID: {})...", name, meta.pid);
-                    signal::kill(Pid::from_raw(meta.pid), Signal::SIGTERM)
-                        .context("Failed to send SIGTERM")?;
-                } else {
-                    println!(
-                        "Process '{}' (PID: {}) is already dead. Cleaning up...",
-                        name, meta.pid
-                    );
-                    state_manager
-                        .remove_process(&name)
-                        .context("Failed to remove process state")?;
+                match control::request_stop(&state_manager, &name)? {
+                    StopOutcome::Signalled { pid } => {
+                        println!("Stopping process '{}' (PID: {})...", name, pid)
+                    }
+                    StopOutcome::WasDead => {
+                        println!("Process '{}' is already dead. Cleaning up...", name)
+                    }
+                    StopOutcome::NotFound => anyhow::bail!("Process '{}' not found", name),
                 }
             } else {
                 anyhow::bail!("Please specify a process name or use --all");
             }
         }
+        cli::Commands::Up { names, file } => cmd_up(&names, file.as_deref())?,
+        cli::Commands::Down { names, file } => cmd_down(&names, file.as_deref())?,
+        cli::Commands::Init => cmd_init()?,
         cli::Commands::Restart { name } => {
             let state_manager =
                 StateManager::new().context("Failed to initialize state manager")?;
@@ -266,6 +244,146 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn cmd_up(names: &[String], file: Option<&Path>) -> Result<()> {
+    let loaded = config::load(file)?;
+    let selected = loaded.select(names)?;
+    let state_manager = StateManager::new().context("Failed to initialize state manager")?;
+    let width = selected.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+
+    let mut failed = 0;
+    for (name, spec) in selected {
+        match start_from_config(&loaded, &state_manager, name, spec) {
+            Ok(message) => println!("  {name:<width$}  {message}"),
+            Err(err) => {
+                failed += 1;
+                println!("  {name:<width$}  failed: {err:#}");
+            }
+        }
+    }
+
+    if failed > 0 {
+        anyhow::bail!("{failed} process(es) failed to start");
+    }
+    Ok(())
+}
+
+fn start_from_config(
+    loaded: &config::LoadedConfig,
+    state_manager: &StateManager,
+    name: &str,
+    spec: &config::ProcessSpec,
+) -> Result<String> {
+    let cwd = loaded.cwd_for(name, spec)?;
+
+    if let Some(existing) = control::running_process(state_manager, name) {
+        // Names are global, so another project may already be using this one.
+        if let Some(other) = existing.cwd.as_deref().filter(|dir| Path::new(dir) != cwd) {
+            anyhow::bail!(
+                "name is in use by a process running in {} (PID {})",
+                other,
+                existing.pid
+            );
+        }
+        return Ok(format!("already running (PID {})", existing.pid));
+    }
+
+    let env = loaded.env_for(name, spec)?;
+    match control::spawn_detached(
+        state_manager,
+        name,
+        &spec.cmd,
+        spec.restart,
+        &[],
+        Some(&cwd),
+        &env,
+    )? {
+        StartOutcome::Started { pid } => Ok(format!("started (PID {pid})")),
+        StartOutcome::Exited => Ok(format!(
+            "started and exited right away (see `runa logs {name}`)"
+        )),
+        StartOutcome::Failed(reason) => anyhow::bail!("{reason}"),
+    }
+}
+
+fn cmd_down(names: &[String], file: Option<&Path>) -> Result<()> {
+    let loaded = config::load(file)?;
+    let selected = loaded.select(names)?;
+    let state_manager = StateManager::new().context("Failed to initialize state manager")?;
+    let width = selected.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+
+    // Signal everything first, then wait for all of them together.
+    let mut results: Vec<(&str, Result<String, String>)> = Vec::new();
+    let mut stopping: Vec<(usize, i32)> = Vec::new();
+    for (name, spec) in &selected {
+        // Don't stop another project's process that happens to share the name.
+        if let Some(existing) = control::running_process(&state_manager, name)
+            && let Ok(cwd) = loaded.cwd_for(name, spec)
+            && let Some(other) = existing.cwd.as_deref().filter(|dir| Path::new(dir) != cwd)
+        {
+            results.push((name, Err(format!("skipped: name belongs to a process running in {other}"))));
+            continue;
+        }
+
+        let result = match control::request_stop(&state_manager, name) {
+            Ok(StopOutcome::Signalled { pid }) => {
+                stopping.push((results.len(), pid));
+                Ok(String::new())
+            }
+            Ok(StopOutcome::WasDead | StopOutcome::NotFound) => Ok("not running".to_string()),
+            Err(err) => Err(format!("failed: {err:#}")),
+        };
+        results.push((name, result));
+    }
+
+    let pids: Vec<i32> = stopping.iter().map(|(_, pid)| *pid).collect();
+    let still_running = control::wait_for_exit(&pids, control::STOP_WAIT_TIMEOUT);
+    for (index, pid) in stopping {
+        results[index].1 = if still_running.contains(&pid) {
+            Err(format!("still running (PID {pid})"))
+        } else {
+            Ok("stopped".to_string())
+        };
+    }
+
+    let mut failed = 0;
+    for (name, result) in results {
+        match result {
+            Ok(message) => println!("  {name:<width$}  {message}"),
+            Err(message) => {
+                failed += 1;
+                println!("  {name:<width$}  {message}");
+            }
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} process(es) were not stopped");
+    }
+    Ok(())
+}
+
+fn cmd_init() -> Result<()> {
+    use std::io::Write;
+
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(config::DEFAULT_FILE)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::bail!("{} already exists", config::DEFAULT_FILE)
+        }
+        Err(err) => return Err(err).context(format!("Failed to create {}", config::DEFAULT_FILE)),
+    };
+    file.write_all(config::TEMPLATE.as_bytes())
+        .context(format!("Failed to write {}", config::DEFAULT_FILE))?;
+    println!(
+        "Created {}. Edit it, then run `runa up`.",
+        config::DEFAULT_FILE
+    );
     Ok(())
 }
 

@@ -52,6 +52,9 @@ impl Supervisor {
         let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())?;
 
         let created_at = unix_now();
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|dir| dir.display().to_string());
         let mut restart_count = 0;
         let mut restart_delay = INITIAL_RESTART_DELAY;
         let mut last_exit_code = None;
@@ -71,6 +74,8 @@ impl Supervisor {
                 restart_count,
                 last_exit_code,
                 last_exit_at,
+                cwd: cwd.clone(),
+                last_error: None,
             };
             self.state_manager.save_process(&meta)?;
 
@@ -88,7 +93,7 @@ impl Supervisor {
                 Ok(c) => c,
                 Err(e) => {
                     error!(name = %self.name, error = %e, "Failed to spawn process");
-                    self.update_status(ProcessStatus::Failed)?;
+                    self.record_failure(&e.to_string())?;
                     return Err(e);
                 }
             };
@@ -232,6 +237,15 @@ impl Supervisor {
     fn update_status(&self, status: ProcessStatus) -> Result<()> {
         if let Ok(mut meta) = self.state_manager.get_process(&self.name) {
             meta.status = status;
+            self.state_manager.save_process(&meta)?;
+        }
+        Ok(())
+    }
+
+    fn record_failure(&self, reason: &str) -> Result<()> {
+        if let Ok(mut meta) = self.state_manager.get_process(&self.name) {
+            meta.status = ProcessStatus::Failed;
+            meta.last_error = Some(reason.to_string());
             self.state_manager.save_process(&meta)?;
         }
         Ok(())

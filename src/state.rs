@@ -26,6 +26,12 @@ pub struct ProcessMetadata {
     pub last_exit_code: Option<i32>,
     #[serde(default)]
     pub last_exit_at: Option<u64>,
+    /// Working directory the supervisor (and its child) runs in.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Why the supervisor gave up, e.g. the command could not be spawned.
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 pub struct StateManager {

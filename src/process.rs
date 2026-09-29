@@ -35,7 +35,9 @@ impl ProcessManager {
             });
         }
 
-        let child = command.spawn()?;
+        let child = command
+            .spawn()
+            .map_err(|e| RunaError::Spawn(program.clone(), e))?;
 
         Ok(child)
     }
