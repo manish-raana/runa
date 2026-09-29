@@ -3,6 +3,7 @@ mod config;
 mod control;
 mod error;
 mod logs;
+mod mcp;
 mod ports;
 mod process;
 mod project;
@@ -171,6 +172,7 @@ fn main() -> Result<()> {
             };
             println!("{message}");
         }
+        cli::Commands::Mcp => mcp::serve()?,
         cli::Commands::Completions { shell } => {
             use clap::CommandFactory;
             clap_complete::generate(

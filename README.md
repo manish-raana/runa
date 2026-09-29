@@ -172,6 +172,7 @@ Each process gets your shell's environment, then the `env_file` variables, then 
 | `runa resurrect` | Start the saved processes again |
 | `runa startup [--remove]` | Run `resurrect` automatically at login |
 | `runa completions <shell>` | Print a shell completion script |
+| `runa mcp` | Run an MCP server for AI agents (see [Use with AI agents](#use-with-ai-agents)) |
 
 Run `runa <command> --help` for every option.
 
@@ -274,7 +275,42 @@ The mouse works too: click a row to select it, scroll to move, and click the act
 
 ## Use with AI agents
 
-Coding agents can use Runa to start dev servers without blocking their shell, check which ports are up, and read logs. This repo includes a ready-made skill, [skills/runa/SKILL.md](skills/runa/SKILL.md), that teaches an agent how: always start in the background, never run `logs -f` or `watch`, verify a server before relying on it, and clean up afterwards.
+Coding agents can use Runa to start dev servers without blocking their shell, check which ports are up, and read logs. There are two ways to connect them, and they work well together.
+
+### MCP server
+
+`runa mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. It gives agents typed tools instead of CLI output to parse:
+
+| Tool | What it does |
+| --- | --- |
+| `list_processes` | Every process with its status, ports, restarts and last error, as JSON |
+| `get_logs` | The last lines of a process's stdout and stderr |
+| `start_process` | Start a command in the background and report whether it came up |
+| `stop_process` | Stop a process and wait until it has exited |
+| `restart_process` | Restart a process gracefully |
+| `project_up` / `project_down` | Start or stop the processes in a `runa.toml` |
+
+Add it to Claude Code:
+
+```bash
+claude mcp add --scope user runa -- runa mcp
+```
+
+For other MCP clients, add this to their server configuration:
+
+```json
+{
+  "mcpServers": {
+    "runa": { "command": "runa", "args": ["mcp"] }
+  }
+}
+```
+
+The server runs in the directory the client starts it in, which is usually your project, so relative `cwd` values and `project_up` without a `file` resolve from there.
+
+### Agent skill
+
+This repo also includes a ready-made skill, [skills/runa/SKILL.md](skills/runa/SKILL.md), that teaches an agent how to use Runa well: always start in the background, never run `logs -f` or `watch`, verify a server before relying on it, and clean up afterwards. It works with or without the MCP server.
 
 Install it for Claude Code (other agents that support [Agent Skills](https://agentskills.io) use the same folder format, in their own skills directory):
 

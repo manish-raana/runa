@@ -20,6 +20,13 @@ If it's missing, tell the user and suggest `brew install manish-raana/tap/runa`
 or `cargo install runa-cli`. Don't install software without the user's
 permission.
 
+**If Runa's MCP tools are available** (`list_processes`, `get_logs`,
+`start_process`, `stop_process`, `restart_process`, `project_up`,
+`project_down`), prefer them over the CLI: they return structured results and
+never block. The rules and workflows below still apply; each CLI command maps
+to the tool of the same purpose. The user can enable them with
+`claude mcp add --scope user runa -- runa mcp`.
+
 ## Rules
 
 1. **Always start in the background.** Use `runa run ... --detach` or

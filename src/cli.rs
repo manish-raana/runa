@@ -128,6 +128,9 @@ pub enum Commands {
         remove: bool,
     },
 
+    /// Run an MCP server on stdin/stdout so AI agents can manage processes
+    Mcp,
+
     /// Print a shell completion script (e.g. `runa completions zsh`)
     Completions {
         /// Shell to generate completions for
