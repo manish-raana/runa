@@ -1,6 +1,6 @@
 [package]
 name = "runa-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A tiny, fast process supervisor: run, restart and monitor any command, with logs and port detection"
