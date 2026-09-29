@@ -137,7 +137,11 @@ fn main() -> Result<()> {
                 anyhow::bail!("Process '{}' is not running.", name);
             }
         }
-        cli::Commands::Logs { name, follow } => {
+        cli::Commands::Logs {
+            name,
+            follow,
+            lines,
+        } => {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -158,23 +162,22 @@ fn main() -> Result<()> {
                 if follow {
                     println!("Following stdout and stderr for '{}'...", name);
                     tokio::try_join!(
-                        LogHandler::tail_logs(stdout_path),
-                        LogHandler::tail_logs(stderr_path)
+                        LogHandler::tail_logs(stdout_path, lines),
+                        LogHandler::tail_logs(stderr_path, lines)
                     )
                     .context("Failed to tail logs")?;
                 } else {
-                    println!("--- stdout ---");
-                    if stdout_path.exists() {
-                        let content = std::fs::read_to_string(&stdout_path)
-                            .context("Failed to read stdout log")?;
-                        print!("{}", content);
-                    }
-
-                    println!("\n--- stderr ---");
-                    if stderr_path.exists() {
-                        let content = std::fs::read_to_string(&stderr_path)
-                            .context("Failed to read stderr log")?;
-                        print!("{}", content);
+                    for (label, path) in [("stdout", &stdout_path), ("stderr", &stderr_path)] {
+                        println!("--- {label} ---");
+                        if path.exists() {
+                            let bytes = std::fs::read(path)
+                                .with_context(|| format!("Failed to read {label} log"))?;
+                            let content = String::from_utf8_lossy(&bytes);
+                            match lines {
+                                Some(n) => print!("{}", logs::last_lines(&content, n)),
+                                None => print!("{}", content),
+                            }
+                        }
                     }
                 }
                 Ok::<(), anyhow::Error>(())
@@ -187,50 +190,40 @@ fn main() -> Result<()> {
             LogHandler::clear_logs(&name, run_dir);
             println!("Logs for process '{}' flushed.", name);
         }
-        cli::Commands::Status => {
+        cli::Commands::Status { json } => {
             let state_manager =
                 StateManager::new().context("Failed to initialize state manager")?;
-            let processes = state_manager
-                .list_processes()
-                .context("Failed to list processes")?;
-            let snapshot = ports::collect_snapshot(&state_manager, false);
-            let mut runa_ports: HashMap<String, Vec<String>> = HashMap::new();
-            for row in &snapshot.rows {
-                if let Some(runa) = &row.runa {
-                    runa_ports
-                        .entry(runa.name.clone())
-                        .or_default()
-                        .push(row.entry.port.to_string());
-                }
-            }
+            let rows = collect_status_rows(&state_manager)?;
 
-            if processes.is_empty() {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&rows).context("Failed to serialize status")?
+                );
+            } else if rows.is_empty() {
                 println!("No processes tracked.");
             } else {
                 println!(
-                    "{:<20} {:<10} {:<10} {:<15} {:<20} {:<30}",
-                    "NAME", "PID", "STATUS", "PORT", "STARTED", "CMD"
+                    "{:<20} {:<10} {:<10} {:<9} {:<15} {:<20} {:<30}",
+                    "NAME", "PID", "STATUS", "RESTARTS", "PORT", "STARTED", "CMD"
                 );
-                for p in processes {
-                    let alive = state::is_runa_supervisor(p.pid);
-                    let status_str = if alive { "Running" } else { "Dead" };
-                    let mut process_ports = runa_ports.remove(&p.name).unwrap_or_default();
-                    process_ports.sort();
-                    process_ports.dedup();
-                    let port_str = if process_ports.is_empty() {
+                for row in rows {
+                    let port_str = if row.ports.is_empty() {
                         "-".to_string()
                     } else {
-                        process_ports.join(",")
+                        row.ports
+                            .iter()
+                            .map(u16::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
                     };
-
-                    let started_at =
-                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(p.created_at);
-                    let datetime: chrono::DateTime<chrono::Local> = started_at.into();
-                    let started_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+                    let started_str = row.started_local.format("%Y-%m-%d %H:%M:%S").to_string();
+                    let mut status_str = row.status.to_string();
+                    status_str[..1].make_ascii_uppercase();
 
                     println!(
-                        "{:<20} {:<10} {:<10} {:<15} {:<20} {:<30}",
-                        p.name, p.pid, status_str, port_str, started_str, p.cmd
+                        "{:<20} {:<10} {:<10} {:<9} {:<15} {:<20} {:<30}",
+                        row.name, row.pid, status_str, row.restarts, port_str, started_str, row.cmd
                     );
                 }
             }
@@ -245,6 +238,77 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct StatusRow {
+    name: String,
+    running: bool,
+    /// "running", "failed" (gave up, e.g. the command could not be spawned)
+    /// or "dead" (the supervisor is gone).
+    status: &'static str,
+    pid: i32,
+    child_pid: Option<i32>,
+    cmd: String,
+    cwd: Option<String>,
+    ports: Vec<u16>,
+    restarts: u64,
+    last_exit_code: Option<i32>,
+    last_error: Option<String>,
+    started_at: String,
+    #[serde(skip)]
+    started_local: chrono::DateTime<chrono::Local>,
+}
+
+fn collect_status_rows(state_manager: &StateManager) -> Result<Vec<StatusRow>> {
+    let mut processes = state_manager
+        .list_processes()
+        .context("Failed to list processes")?;
+    processes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let snapshot = ports::collect_snapshot(state_manager, false);
+    let mut runa_ports: HashMap<String, Vec<u16>> = HashMap::new();
+    for row in &snapshot.rows {
+        if let Some(runa) = &row.runa {
+            runa_ports
+                .entry(runa.name.clone())
+                .or_default()
+                .push(row.entry.port);
+        }
+    }
+
+    Ok(processes
+        .into_iter()
+        .map(|p| {
+            let running = state::is_runa_supervisor(p.pid);
+            let status = match (running, &p.status) {
+                (true, _) => "running",
+                (false, state::ProcessStatus::Failed) => "failed",
+                (false, _) => "dead",
+            };
+            let mut ports = runa_ports.remove(&p.name).unwrap_or_default();
+            ports.sort_unstable();
+            ports.dedup();
+            let started_local: chrono::DateTime<chrono::Local> =
+                (std::time::UNIX_EPOCH + std::time::Duration::from_secs(p.created_at)).into();
+
+            StatusRow {
+                name: p.name,
+                running,
+                status,
+                pid: p.pid,
+                child_pid: p.child_pid,
+                cmd: p.cmd,
+                cwd: p.cwd,
+                ports,
+                restarts: p.restart_count,
+                last_exit_code: p.last_exit_code,
+                last_error: p.last_error,
+                started_at: started_local.to_rfc3339(),
+                started_local,
+            }
+        })
+        .collect())
 }
 
 fn cmd_up(names: &[String], file: Option<&Path>) -> Result<()> {

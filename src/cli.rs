@@ -65,6 +65,10 @@ pub enum Commands {
         /// Follow the logs in real-time
         #[arg(long, short = 'f')]
         follow: bool,
+
+        /// Only show the last N lines of each log
+        #[arg(long, short = 'n')]
+        lines: Option<usize>,
     },
 
     /// Clear logs for a process
@@ -75,7 +79,11 @@ pub enum Commands {
     },
 
     /// List all processes
-    Status,
+    Status {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Start the processes defined in runa.toml
     Up {

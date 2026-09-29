@@ -111,7 +111,9 @@ impl LogHandler {
         tokio::fs::rename(path, bak_path).await
     }
 
-    pub async fn tail_logs(path: PathBuf) -> Result<()> {
+    /// Print a log file and keep following it. With `start_lines`, only the
+    /// last that many existing lines are printed first.
+    pub async fn tail_logs(path: PathBuf, start_lines: Option<usize>) -> Result<()> {
         if !path.exists() {
             println!("Log file not found: {:?}", path);
             return Ok(());
@@ -120,6 +122,11 @@ impl LogHandler {
         // Print existing content, then follow. `pos` advances by exactly the
         // bytes printed so data appended mid-read is never printed twice.
         let mut pos = 0u64;
+        if let Some(n) = start_lines {
+            let bytes = tokio::fs::read(&path).await?;
+            print!("{}", last_lines(&String::from_utf8_lossy(&bytes), n));
+            pos = bytes.len() as u64;
+        }
         loop {
             // A missing file means it is mid-rotation; retry on the next tick.
             if let Ok(metadata) = tokio::fs::metadata(&path).await {
@@ -142,5 +149,37 @@ impl LogHandler {
 
             sleep(Duration::from_millis(500)).await;
         }
+    }
+}
+
+/// The last `n` lines of `content`, including the trailing newline if any.
+pub fn last_lines(content: &str, n: usize) -> &str {
+    if n == 0 {
+        return "";
+    }
+    let body = content.strip_suffix('\n').unwrap_or(content);
+    let mut seen = 0;
+    for (i, byte) in body.bytes().enumerate().rev() {
+        if byte == b'\n' {
+            seen += 1;
+            if seen == n {
+                return &content[i + 1..];
+            }
+        }
+    }
+    content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::last_lines;
+
+    #[test]
+    fn takes_last_lines() {
+        assert_eq!(last_lines("a\nb\nc\n", 2), "b\nc\n");
+        assert_eq!(last_lines("a\nb\nc", 1), "c");
+        assert_eq!(last_lines("a\nb\n", 10), "a\nb\n");
+        assert_eq!(last_lines("a\nb\n", 0), "");
+        assert_eq!(last_lines("", 3), "");
     }
 }

@@ -72,6 +72,22 @@ runa stop api
 
 Leave out `--detach` to run in the foreground. Output then streams to your terminal, and <kbd>Ctrl</kbd>+<kbd>C</kbd> shuts the process down cleanly.
 
+### Scripting with `--json`
+
+`runa status --json` prints an array with one object per process, for use in scripts and tools:
+
+```console
+$ runa status --json | jq '.[] | {name, status, ports, restarts}'
+{
+  "name": "api",
+  "status": "running",
+  "ports": [3000],
+  "restarts": 0
+}
+```
+
+Each object has these fields: `name`, `running`, `status` (`running`, `failed` or `dead`), `pid`, `child_pid`, `cmd`, `cwd`, `ports`, `restarts`, `last_exit_code`, `last_error` and `started_at` (RFC 3339). When nothing is tracked, the output is `[]`.
+
 ## Project files (`runa.toml`)
 
 Put a `runa.toml` in your project and start the whole stack with one command:
@@ -125,8 +141,8 @@ Each process gets your shell's environment, then the `env_file` variables, then 
 | `runa up [names…]` | Start the processes in `runa.toml` |
 | `runa down [names…]` | Stop the processes in `runa.toml` and wait for them to exit |
 | `runa init` | Create a starter `runa.toml` |
-| `runa status` | List tracked processes with PID, status, ports and start time |
-| `runa logs <name> [--follow]` | Print a process's logs, or follow them live |
+| `runa status [--json]` | List tracked processes with PID, status, restarts, ports and start time |
+| `runa logs <name> [-n N] [--follow]` | Print a process's logs (or the last N lines), or follow them live |
 | `runa restart <name>` | Gracefully restart the process |
 | `runa stop <name>` | Gracefully stop the process |
 | `runa stop --all` | Stop every tracked process |
@@ -215,7 +231,7 @@ Each process writes two log files, and every line is timestamped:
 [2026-09-29 10:40:47] [api] Server listening on :3000
 ```
 
-- `runa logs <name>` prints both files. `--follow` keeps streaming stdout and stderr as they're written.
+- `runa logs <name>` prints both files. `-n 50` prints only the last 50 lines of each. `--follow` keeps streaming stdout and stderr as they're written; with `-n`, it starts from the last N lines.
 - When a log file passes **10 MB**, it's renamed to `*.log.bak`, and a new file is started.
 - Logs are **cleared each time a process is started** with `runa run`. Restarts caused by crashes or `runa restart` keep the existing logs.
 
