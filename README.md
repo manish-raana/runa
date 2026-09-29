@@ -218,6 +218,23 @@ runa watch --interval 500  # refresh every 500ms (minimum 250ms)
 
 The mouse works too: click a row to select it, scroll to move, and click the action buttons. Every destructive action asks for confirmation first (<kbd>y</kbd>/<kbd>Enter</kbd> to confirm, <kbd>n</kbd>/<kbd>Esc</kbd> to cancel).
 
+## Use with AI agents
+
+Coding agents can use Runa to start dev servers without blocking their shell, check which ports are up, and read logs. This repo includes a ready-made skill, [skills/runa/SKILL.md](skills/runa/SKILL.md), that teaches an agent how: always start in the background, never run `logs -f` or `watch`, verify a server before relying on it, and clean up afterwards.
+
+Install it for Claude Code (other agents that support [Agent Skills](https://agentskills.io) use the same folder format, in their own skills directory):
+
+```bash
+# For every project
+mkdir -p ~/.claude/skills/runa
+curl -fsSL https://raw.githubusercontent.com/manish-raana/runa/main/skills/runa/SKILL.md \
+  -o ~/.claude/skills/runa/SKILL.md
+
+# Or for one project only: use <project>/.claude/skills/runa/ instead
+```
+
+The agent also needs the `runa` binary on its `PATH`. `runa status --json` and `runa logs <name> -n 50` are the two commands built for agents: both return immediately with output that's easy to parse.
+
 ## Logs
 
 Each process writes two log files, and every line is timestamped:
