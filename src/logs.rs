@@ -152,6 +152,34 @@ impl LogHandler {
     }
 }
 
+/// A process's stdout and stderr logs under `--- stdout ---` / `--- stderr ---`
+/// headers, optionally limited to the last `lines` of each.
+pub fn read_logs(log_dir: &Path, name: &str, lines: Option<usize>) -> anyhow::Result<String> {
+    let stdout_path = log_path(log_dir, name, "out");
+    let stderr_path = log_path(log_dir, name, "err");
+    if !stdout_path.exists() && !stderr_path.exists() {
+        anyhow::bail!("No log files found for process '{name}'");
+    }
+
+    let mut output = String::new();
+    for (label, path) in [("stdout", &stdout_path), ("stderr", &stderr_path)] {
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&format!("--- {label} ---\n"));
+        if path.exists() {
+            let bytes = std::fs::read(path)
+                .map_err(|e| anyhow::anyhow!("Failed to read {label} log: {e}"))?;
+            let content = String::from_utf8_lossy(&bytes);
+            match lines {
+                Some(n) => output.push_str(last_lines(&content, n)),
+                None => output.push_str(&content),
+            }
+        }
+    }
+    Ok(output)
+}
+
 /// The last `n` lines of `content`, including the trailing newline if any.
 pub fn last_lines(content: &str, n: usize) -> &str {
     if n == 0 {

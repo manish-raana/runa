@@ -1,3 +1,4 @@
+use crate::cli::RestartPolicy;
 use crate::error::{Result, RunaError};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -32,6 +33,15 @@ pub struct ProcessMetadata {
     /// Why the supervisor gave up, e.g. the command could not be spawned.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Restart policy, recorded so `runa save` can restore the process.
+    #[serde(default)]
+    pub restart: Option<RestartPolicy>,
+    /// `KEY=VALUE` pairs given with `--env`.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// The runa.toml the process was started from, if any.
+    #[serde(default)]
+    pub config_file: Option<String>,
 }
 
 pub struct StateManager {
@@ -46,6 +56,9 @@ impl StateManager {
 
         if !run_dir.exists() {
             fs::create_dir_all(&run_dir)?;
+            // State and logs can contain environment values: owner-only.
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700))?;
         }
 
         Ok(Self { run_dir })

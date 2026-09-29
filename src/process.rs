@@ -22,6 +22,10 @@ impl ProcessManager {
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // Supervisor handoff variables are for Runa only; the user's
+            // command must not inherit them.
+            .env_remove(crate::control::SUPERVISOR_ENV)
+            .env_remove(crate::control::CONFIG_ENV)
             .envs(env_vars);
 
         // Put the child in its own process group

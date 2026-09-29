@@ -168,6 +168,10 @@ Each process gets your shell's environment, then the `env_file` variables, then 
 | `runa stop --all` | Stop every tracked process |
 | `runa flush <name>` | Delete a process's log files |
 | `runa watch` | Open the live port dashboard |
+| `runa save` | Remember the running processes |
+| `runa resurrect` | Start the saved processes again |
+| `runa startup [--remove]` | Run `resurrect` automatically at login |
+| `runa completions <shell>` | Print a shell completion script |
 
 Run `runa <command> --help` for every option.
 
@@ -205,6 +209,36 @@ runa run --name worker \
 | `never` | never. Runa stops supervising once the process exits. |
 
 Restarts back off exponentially: the wait starts at **1s** and doubles each time, up to **30s**. If a process ran for at least 30 seconds before exiting, the wait resets to 1s. A process that crashes once a day restarts right away; one that crashes on startup doesn't spin.
+
+## Surviving reboots
+
+Save the processes you have running, and Runa can start them again after a restart:
+
+```bash
+runa save        # remember what's running now
+runa startup     # start the saved processes at every login
+```
+
+- **`runa save`** records each running process: its command, working directory, restart policy and `-e` variables. Run it again whenever your set of processes changes. Processes started from a `runa.toml` are restored from that file, so `env_file` values are read fresh rather than copied into the snapshot.
+- **`runa resurrect`** starts every saved process that isn't already running. You can run it by hand at any time.
+- **`runa startup`** installs a login item that runs `runa resurrect`: a launchd agent on macOS (`~/Library/LaunchAgents/dev.runa.resurrect.plist`) or a systemd user service on Linux (`runa-resurrect.service`). It records your current `PATH`, so commands like `npm` are found the same way they are in your shell. `runa startup --remove` uninstalls it.
+
+On Linux, user services start when you log in. To start them at boot without logging in, also run `loginctl enable-linger`.
+
+## Shell completions
+
+```bash
+# zsh
+runa completions zsh > "${fpath[1]}/_runa"
+
+# bash
+runa completions bash > ~/.local/share/bash-completion/completions/runa
+
+# fish
+runa completions fish > ~/.config/fish/completions/runa.fish
+```
+
+Start a new shell afterwards. `elvish` and `powershell` are supported too.
 
 ## Port dashboard
 
@@ -294,7 +328,6 @@ runa run --name api --cmd "node server.js"
 
 Runa is deliberately small. It does **not** yet:
 
-- start processes again after a reboot (no systemd or launchd integration)
 - run clusters or multiple instances of one process
 - watch files and reload on changes
 - run on Windows

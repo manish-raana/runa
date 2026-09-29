@@ -43,10 +43,6 @@ pub enum Commands {
         /// Run in background (detach)
         #[arg(long, short = 'd')]
         detach: bool,
-
-        /// Internal flag for detached supervisor
-        #[arg(long, hide = true)]
-        internal_supervisor: bool,
     },
 
     /// Stop a running process
@@ -119,6 +115,25 @@ pub enum Commands {
     /// Create a runa.toml template in the current directory
     Init,
 
+    /// Save the running processes so `runa resurrect` can start them again
+    Save,
+
+    /// Start the processes saved with `runa save`
+    Resurrect,
+
+    /// Start saved processes automatically at login (launchd/systemd)
+    Startup {
+        /// Remove the login item instead
+        #[arg(long)]
+        remove: bool,
+    },
+
+    /// Print a shell completion script (e.g. `runa completions zsh`)
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+
     /// Watch local ports in a live terminal dashboard
     Watch {
         /// Refresh interval in milliseconds
@@ -135,7 +150,18 @@ pub enum Commands {
     },
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug, serde::Deserialize)]
+#[derive(
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    ValueEnum,
+    Debug,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum RestartPolicy {
     Always,

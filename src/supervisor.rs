@@ -16,6 +16,7 @@ pub struct Supervisor {
     cmd: String,
     restart_policy: RestartPolicy,
     env_vars: HashMap<String, String>,
+    config_file: Option<String>,
     state_manager: StateManager,
 }
 
@@ -30,6 +31,7 @@ impl Supervisor {
         cmd: String,
         restart_policy: RestartPolicy,
         env_vars: HashMap<String, String>,
+        config_file: Option<String>,
     ) -> Result<Self> {
         let state_manager = StateManager::new()?;
         Ok(Self {
@@ -37,6 +39,7 @@ impl Supervisor {
             cmd,
             restart_policy,
             env_vars,
+            config_file,
             state_manager,
         })
     }
@@ -60,6 +63,12 @@ impl Supervisor {
         let mut last_exit_code = None;
         let mut last_exit_at = None;
         let mut logs_cleared = false;
+        let mut env_args: Vec<String> = self
+            .env_vars
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        env_args.sort();
 
         loop {
             // Register process state
@@ -76,6 +85,9 @@ impl Supervisor {
                 last_exit_at,
                 cwd: cwd.clone(),
                 last_error: None,
+                restart: Some(self.restart_policy),
+                env: env_args.clone(),
+                config_file: self.config_file.clone(),
             };
             self.state_manager.save_process(&meta)?;
 

@@ -524,6 +524,9 @@ mod tests {
             last_exit_at: None,
             cwd: None,
             last_error: None,
+            restart: None,
+            env: Vec::new(),
+            config_file: None,
         }];
 
         let pid_map = build_runa_pid_map(&processes);
