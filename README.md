@@ -1,5 +1,13 @@
 <div align="center">
 
+<pre>
+ ____
+|  _ \    _   _    _ __      __ _
+| |_) |  | | | |  | '_ \    / _` |
+|  _ <   | |_| |  | | | |  | (_| |
+|_| \_\   \__,_|  |_| |_|   \__,_|
+</pre>
+
 # Runa
 
 **A tiny, fast process supervisor for your terminal.**

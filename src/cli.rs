@@ -1,8 +1,19 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+/// ASCII-art brand banner, shown at the top of `runa` help output.
+pub const BANNER: &str = r"
+ ____
+|  _ \    _   _    _ __      __ _
+| |_) |  | | | |  | '_ \    / _` |
+|  _ <   | |_| |  | | | |  | (_| |
+|_| \_\   \__,_|  |_| |_|   \__,_|
+
+ keep your processes alive
+";
+
 #[derive(Parser, Debug)]
-#[command(name = "runa", version)]
+#[command(name = "runa", version, before_help = BANNER, arg_required_else_help = true)]
 #[command(about = "A minimal process supervisor", long_about = None)]
 pub struct Args {
     #[command(subcommand)]
