@@ -127,8 +127,7 @@ pub fn request_stop(state_manager: &StateManager, name: &str) -> Result<StopOutc
     }
 
     if state::is_runa_supervisor(meta.pid) {
-        signal::kill(Pid::from_raw(meta.pid), Signal::SIGTERM)
-            .context("Failed to send SIGTERM")?;
+        signal::kill(Pid::from_raw(meta.pid), Signal::SIGTERM).context("Failed to send SIGTERM")?;
         Ok(StopOutcome::Signalled { pid: meta.pid })
     } else {
         state_manager

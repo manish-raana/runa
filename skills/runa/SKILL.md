@@ -16,9 +16,9 @@ command, so your shell stays free and the process can still be inspected.
 command -v runa || echo "runa is not installed"
 ```
 
-If it's missing, tell the user and suggest
-`cargo install --git https://github.com/manish-raana/runa`. Don't install
-software without the user's permission.
+If it's missing, tell the user and suggest `brew install manish-raana/tap/runa`
+or `cargo install runa-cli`. Don't install software without the user's
+permission.
 
 ## Rules
 

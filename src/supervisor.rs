@@ -115,7 +115,11 @@ impl Supervisor {
                 ));
             }
             if let Some(stderr) = child.stderr.take() {
-                log_tasks.push(LogHandler::stream_stderr(stderr, self.name.clone(), log_dir));
+                log_tasks.push(LogHandler::stream_stderr(
+                    stderr,
+                    self.name.clone(),
+                    log_dir,
+                ));
             }
             let started_at = Instant::now();
 

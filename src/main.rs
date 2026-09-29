@@ -315,7 +315,11 @@ fn cmd_up(names: &[String], file: Option<&Path>) -> Result<()> {
     let loaded = config::load(file)?;
     let selected = loaded.select(names)?;
     let state_manager = StateManager::new().context("Failed to initialize state manager")?;
-    let width = selected.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    let width = selected
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
 
     let mut failed = 0;
     for (name, spec) in selected {
@@ -376,7 +380,11 @@ fn cmd_down(names: &[String], file: Option<&Path>) -> Result<()> {
     let loaded = config::load(file)?;
     let selected = loaded.select(names)?;
     let state_manager = StateManager::new().context("Failed to initialize state manager")?;
-    let width = selected.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    let width = selected
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
 
     // Signal everything first, then wait for all of them together.
     let mut results: Vec<(&str, Result<String, String>)> = Vec::new();
@@ -387,7 +395,12 @@ fn cmd_down(names: &[String], file: Option<&Path>) -> Result<()> {
             && let Ok(cwd) = loaded.cwd_for(name, spec)
             && let Some(other) = existing.cwd.as_deref().filter(|dir| Path::new(dir) != cwd)
         {
-            results.push((name, Err(format!("skipped: name belongs to a process running in {other}"))));
+            results.push((
+                name,
+                Err(format!(
+                    "skipped: name belongs to a process running in {other}"
+                )),
+            ));
             continue;
         }
 

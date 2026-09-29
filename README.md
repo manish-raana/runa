@@ -7,6 +7,7 @@
 Run any command, keep it alive, read its logs, and see which ports it's using, all from one small Rust binary.<br>
 Think PM2, without the Node.js runtime or the config files.
 
+[![CI](https://github.com/manish-raana/runa/actions/workflows/ci.yml/badge.svg)](https://github.com/manish-raana/runa/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
@@ -39,17 +40,28 @@ worker               87102      Running    -               2026-09-29 10:41:02  
 
 ## Install
 
-Runa runs on **macOS and Linux**. Building it needs Rust **1.88 or newer**.
+Runa runs on **macOS and Linux** (Intel and ARM). The command is `runa`.
 
 ```bash
-# Install straight from GitHub
-cargo install --git https://github.com/manish-raana/runa
+# Homebrew
+brew install manish-raana/tap/runa
 
-# …or from a local clone
+# Shell installer (prebuilt binary)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/manish-raana/runa/releases/latest/download/runa-cli-installer.sh | sh
+
+# Cargo (the crate is named runa-cli; it installs the `runa` command)
+cargo install runa-cli
+```
+
+To build from source, you need Rust **1.88 or newer**:
+
+```bash
 git clone https://github.com/manish-raana/runa
 cd runa
 cargo install --path .
 ```
+
+Check it worked with `runa --version`.
 
 ## Quick start
 

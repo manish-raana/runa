@@ -149,7 +149,10 @@ impl LoadedConfig {
         if let Some(file) = &spec.env_file {
             let path = self.base_dir.join(file);
             let entries = dotenvy::from_path_iter(&path).with_context(|| {
-                format!("Process '{name}': failed to read env_file {}", path.display())
+                format!(
+                    "Process '{name}': failed to read env_file {}",
+                    path.display()
+                )
             })?;
             for entry in entries {
                 let (key, value) = entry.with_context(|| {
@@ -267,14 +270,27 @@ mod tests {
         )
         .unwrap();
 
-        let all: Vec<&str> = loaded.select(&[]).unwrap().iter().map(|(n, _)| *n).collect();
+        let all: Vec<&str> = loaded
+            .select(&[])
+            .unwrap()
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
         assert_eq!(all, ["a", "b", "c"]);
 
         let names = vec!["c".to_string(), "a".to_string(), "c".to_string()];
-        let some: Vec<&str> = loaded.select(&names).unwrap().iter().map(|(n, _)| *n).collect();
+        let some: Vec<&str> = loaded
+            .select(&names)
+            .unwrap()
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
         assert_eq!(some, ["c", "a"]);
 
-        let err = loaded.select(&["nope".to_string()]).unwrap_err().to_string();
+        let err = loaded
+            .select(&["nope".to_string()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("nope"), "{err}");
     }
 

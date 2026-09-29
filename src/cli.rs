@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "runa")]
+#[command(name = "runa", version)]
 #[command(about = "A minimal process supervisor", long_about = None)]
 pub struct Args {
     #[command(subcommand)]

@@ -1,7 +1,20 @@
 [package]
-name = "runa"
-version = "0.1.0"
+name = "runa-cli"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
+description = "A tiny, fast process supervisor: run, restart and monitor any command, with logs and port detection"
+license = "MIT"
+repository = "https://github.com/manish-raana/runa"
+homepage = "https://github.com/manish-raana/runa"
+readme = "README.md"
+keywords = ["process-manager", "supervisor", "pm2", "cli", "devtools"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [".roo/", ".github/", "skills/"]
+
+[[bin]]
+name = "runa"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.53", features = ["derive"] }
@@ -19,3 +32,8 @@ ratatui = { version = "0.30.0", features = ["crossterm_0_29"] }
 crossterm = "0.29"
 toml = "1.1.6"
 dotenvy = "0.15.7"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -1,5 +1,5 @@
-use crate::ports::{PortRow, PortSnapshot, collect_snapshot};
 use crate::logs::log_path;
+use crate::ports::{PortRow, PortSnapshot, collect_snapshot};
 use crate::state::{StateManager, is_runa_supervisor};
 use anyhow::{Context, Result};
 use crossterm::event::{
