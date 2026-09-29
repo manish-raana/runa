@@ -60,9 +60,7 @@ impl StateManager {
         // In v0.1, we want to prevent starting a process if it's already "Running"
         if let Ok(existing) = self.get_process(&meta.name) {
             // Check if the supervisor process is actually alive AND it's not us
-            let alive =
-                nix::sys::signal::kill(nix::unistd::Pid::from_raw(existing.pid), None).is_ok();
-            if alive && existing.pid != meta.pid {
+            if existing.pid != meta.pid && is_runa_supervisor(existing.pid) {
                 return Err(RunaError::ProcessAlreadyExists(meta.name.clone()));
             }
         }
@@ -132,6 +130,37 @@ impl StateManager {
 
 fn current_schema_version() -> u32 {
     1
+}
+
+/// Returns true if `pid` is alive and is still a Runa supervisor. A stale state
+/// file can point at a PID the OS has since reused for an unrelated process, so
+/// liveness alone is not enough before sending signals.
+pub fn is_runa_supervisor(pid: i32) -> bool {
+    if pid <= 1 || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+        return false;
+    }
+
+    let output = match std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output()
+    {
+        Ok(output) => output,
+        // ps unavailable: fall back to liveness only
+        Err(_) => return true,
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "runa".to_string());
+    let args = String::from_utf8_lossy(&output.stdout);
+    args.split_whitespace()
+        .next()
+        .and_then(|argv0| Path::new(argv0).file_name())
+        .is_some_and(|name| name.to_string_lossy() == exe_name)
 }
 
 pub fn sanitize_process_name(name: &str) -> String {

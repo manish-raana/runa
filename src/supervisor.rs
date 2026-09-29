@@ -4,9 +4,10 @@ use crate::logs::LogHandler;
 use crate::process::ProcessManager;
 use crate::state::{ProcessMetadata, ProcessStatus, StateManager};
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Child;
 use tokio::signal;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
@@ -20,6 +21,8 @@ pub struct Supervisor {
 
 const INITIAL_RESTART_DELAY: Duration = Duration::from_secs(1);
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
+const STABLE_RUN_DURATION: Duration = Duration::from_secs(30);
+const LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl Supervisor {
     pub fn new(
@@ -42,16 +45,18 @@ impl Supervisor {
         let supervisor_pid = std::process::id() as i32;
         info!(name = %self.name, pid = supervisor_pid, "Supervisor starting...");
 
-        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
-        let mut sighup = signal::unix::signal(signal::unix::SignalKind::hangup()).unwrap();
+        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+        let mut sighup = signal::unix::signal(signal::unix::SignalKind::hangup())?;
+        // A persistent SIGINT stream (rather than a fresh ctrl_c() per select)
+        // so an interrupt that arrives during the restart delay is not lost.
+        let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())?;
 
-        // Clear logs when the supervisor starts (Truncate policy)
-        LogHandler::clear_logs(&self.name, self.state_manager.get_run_dir());
         let created_at = unix_now();
         let mut restart_count = 0;
         let mut restart_delay = INITIAL_RESTART_DELAY;
         let mut last_exit_code = None;
         let mut last_exit_at = None;
+        let mut logs_cleared = false;
 
         loop {
             // Register process state
@@ -68,6 +73,14 @@ impl Supervisor {
                 last_exit_at,
             };
             self.state_manager.save_process(&meta)?;
+
+            // Clear logs when the supervisor starts (Truncate policy). This must
+            // happen after save_process has claimed the name, otherwise a
+            // rejected duplicate start would wipe the running process's logs.
+            if !logs_cleared {
+                LogHandler::clear_logs(&self.name, self.state_manager.get_run_dir());
+                logs_cleared = true;
+            }
 
             // Spawn process
             info!(name = %self.name, cmd = %self.cmd, "Spawning child process...");
@@ -88,37 +101,47 @@ impl Supervisor {
 
             // Setup logging
             let log_dir = self.state_manager.get_run_dir();
+            let mut log_tasks = Vec::new();
             if let Some(stdout) = child.stdout.take() {
-                LogHandler::stream_stdout(stdout, self.name.clone(), log_dir.clone());
+                log_tasks.push(LogHandler::stream_stdout(
+                    stdout,
+                    self.name.clone(),
+                    log_dir.clone(),
+                ));
             }
             if let Some(stderr) = child.stderr.take() {
-                LogHandler::stream_stderr(stderr, self.name.clone(), log_dir);
+                log_tasks.push(LogHandler::stream_stderr(stderr, self.name.clone(), log_dir));
             }
+            let started_at = Instant::now();
 
             // Wait for child exit or shutdown signal
             let status = tokio::select! {
                 exit_status = child.wait() => {
                     exit_status?
                 }
-                _ = signal::ctrl_c() => {
+                _ = sigint.recv() => {
                     info!(name = %self.name, "Received Ctrl+C, shutting down gracefully...");
                     self.graceful_shutdown(child).await;
+                    drain_log_tasks(log_tasks).await;
                     self.cleanup()?;
                     return Ok(());
                 }
                 _ = sigterm.recv() => {
                     info!(name = %self.name, "Received SIGTERM, shutting down gracefully...");
                     self.graceful_shutdown(child).await;
+                    drain_log_tasks(log_tasks).await;
                     self.cleanup()?;
                     return Ok(());
                 }
                 _ = sighup.recv() => {
                     info!(name = %self.name, "Received SIGHUP, restarting process...");
                     self.graceful_shutdown(child).await;
+                    drain_log_tasks(log_tasks).await;
                     // Loop will continue and restart process
                     continue;
                 }
             };
+            drain_log_tasks(log_tasks).await;
 
             // Process exited
             if status.success() {
@@ -130,35 +153,44 @@ impl Supervisor {
             last_exit_at = Some(unix_now());
             self.update_exit_metadata(last_exit_code, last_exit_at.unwrap())?;
 
-            match self.restart_policy {
-                RestartPolicy::Always => {
-                    restart_count += 1;
-                    info!(name = %self.name, delay_ms = restart_delay.as_millis(), "Restarting (Policy: Always)...");
-                    self.update_status(ProcessStatus::Running)?;
-                    sleep(restart_delay).await;
-                    restart_delay = next_restart_delay(restart_delay);
-                    continue;
+            let should_restart = match self.restart_policy {
+                RestartPolicy::Always => true,
+                RestartPolicy::OnFailure => !status.success(),
+                RestartPolicy::Never => false,
+            };
+            if !should_restart {
+                info!(name = %self.name, policy = ?self.restart_policy, "Process finished, not restarting.");
+                self.update_status(ProcessStatus::Stopped)?;
+                break;
+            }
+
+            // A process that ran stably is not crash-looping; reset the backoff.
+            if started_at.elapsed() >= STABLE_RUN_DURATION {
+                restart_delay = INITIAL_RESTART_DELAY;
+            }
+
+            restart_count += 1;
+            info!(name = %self.name, policy = ?self.restart_policy, delay_ms = restart_delay.as_millis(), "Restarting...");
+            self.update_status(ProcessStatus::Running)?;
+
+            // Stay responsive to signals while waiting to restart.
+            tokio::select! {
+                _ = sleep(restart_delay) => {}
+                _ = sigint.recv() => {
+                    info!(name = %self.name, "Received Ctrl+C during restart delay, shutting down...");
+                    self.cleanup()?;
+                    return Ok(());
                 }
-                RestartPolicy::OnFailure => {
-                    if !status.success() {
-                        restart_count += 1;
-                        info!(name = %self.name, delay_ms = restart_delay.as_millis(), "Restarting (Policy: OnFailure)...");
-                        self.update_status(ProcessStatus::Running)?;
-                        sleep(restart_delay).await;
-                        restart_delay = next_restart_delay(restart_delay);
-                        continue;
-                    } else {
-                        info!(name = %self.name, "Process completed successfully, not restarting.");
-                        self.update_status(ProcessStatus::Stopped)?;
-                        break;
-                    }
+                _ = sigterm.recv() => {
+                    info!(name = %self.name, "Received SIGTERM during restart delay, shutting down...");
+                    self.cleanup()?;
+                    return Ok(());
                 }
-                RestartPolicy::Never => {
-                    info!(name = %self.name, "Process finished (Policy: Never).");
-                    self.update_status(ProcessStatus::Stopped)?;
-                    break;
+                _ = sighup.recv() => {
+                    info!(name = %self.name, "Received SIGHUP, restarting immediately...");
                 }
             }
+            restart_delay = next_restart_delay(restart_delay);
         }
 
         self.cleanup()?;
@@ -189,6 +221,9 @@ impl Supervisor {
                 _ = timeout => {
                     warn!(name = %self.name, "Timeout reached, sending SIGKILL to process group...");
                     let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pgid), nix::sys::signal::Signal::SIGKILL);
+                    // Reap the child so it doesn't linger (e.g. still holding its
+                    // port) when we restart.
+                    let _ = child.wait().await;
                 }
             }
         }
@@ -226,4 +261,15 @@ fn unix_now() -> u64 {
 
 fn next_restart_delay(current: Duration) -> Duration {
     (current * 2).min(MAX_RESTART_DELAY)
+}
+
+/// Wait for log streaming tasks to write out remaining output. Bounded, since
+/// a grandchild that inherited the pipes can keep them open indefinitely.
+async fn drain_log_tasks(tasks: Vec<JoinHandle<()>>) {
+    let _ = tokio::time::timeout(LOG_DRAIN_TIMEOUT, async {
+        for task in tasks {
+            let _ = task.await;
+        }
+    })
+    .await;
 }

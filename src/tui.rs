@@ -1,5 +1,6 @@
 use crate::ports::{PortRow, PortSnapshot, collect_snapshot};
-use crate::state::StateManager;
+use crate::logs::log_path;
+use crate::state::{StateManager, is_runa_supervisor};
 use anyhow::{Context, Result};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
@@ -119,6 +120,7 @@ struct App {
     pending_action: Option<Action>,
     message: String,
     table_area: Rect,
+    table_offset: usize,
     mouse_targets: Vec<(Rect, MouseTarget)>,
 }
 
@@ -142,6 +144,7 @@ impl App {
             pending_action: None,
             message: "ready".to_string(),
             table_area: Rect::default(),
+            table_offset: 0,
             mouse_targets: Vec::new(),
         }
     }
@@ -256,7 +259,11 @@ fn handle_key(app: &mut App, state_manager: &StateManager, code: KeyCode) -> Res
     if let Some(action) = app.pending_action.clone() {
         match code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                execute_action(app, state_manager, action)?;
+                // A failed action (e.g. the process already exited) is shown
+                // in the status bar rather than tearing down the TUI.
+                if let Err(err) = execute_action(app, state_manager, action) {
+                    app.message = format!("{err:#}");
+                }
                 app.pending_action = None;
                 app.refresh(state_manager);
             }
@@ -372,7 +379,7 @@ fn handle_click(app: &mut App, state_manager: &StateManager, column: u16, row: u
     }
 
     if rect_contains(app.table_area, column, row) && row > app.table_area.y + 1 {
-        let index = row.saturating_sub(app.table_area.y + 2) as usize;
+        let index = app.table_offset + row.saturating_sub(app.table_area.y + 2) as usize;
         let len = app.visible_rows().len();
         if index < len {
             app.selected = index;
@@ -440,6 +447,9 @@ fn execute_action(app: &mut App, state_manager: &StateManager, action: Action) -
             let meta = state_manager
                 .get_process(&name)
                 .context("Failed to read Runa process state")?;
+            if !is_runa_supervisor(meta.pid) {
+                anyhow::bail!("Runa process '{name}' is not running");
+            }
             signal::kill(Pid::from_raw(meta.pid), Signal::SIGTERM)
                 .context("Failed to stop Runa process")?;
             app.message = format!("sent SIGTERM to {name}");
@@ -448,6 +458,9 @@ fn execute_action(app: &mut App, state_manager: &StateManager, action: Action) -
             let meta = state_manager
                 .get_process(&name)
                 .context("Failed to read Runa process state")?;
+            if !is_runa_supervisor(meta.pid) {
+                anyhow::bail!("Runa process '{name}' is not running");
+            }
             signal::kill(Pid::from_raw(meta.pid), Signal::SIGHUP)
                 .context("Failed to restart Runa process")?;
             app.message = format!("sent SIGHUP to {name}");
@@ -503,8 +516,8 @@ fn selected_summary(row: &PortRow, state_manager: &StateManager) -> String {
         row.entry.pid,
         row.entry.command,
         runa,
-        log_dir.join(format!("{runa}.out.log")).display(),
-        log_dir.join(format!("{runa}.err.log")).display()
+        log_path(&log_dir, runa, "out").display(),
+        log_path(&log_dir, runa, "err").display()
     )
 }
 
@@ -641,11 +654,13 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     )
     .highlight_symbol(">");
 
-    let mut state = TableState::default();
+    let mut state = TableState::default().with_offset(app.table_offset);
     if !visible_rows.is_empty() {
         state.select(Some(app.selected.min(visible_rows.len() - 1)));
     }
     frame.render_stateful_widget(table, area, &mut state);
+    // Remember the scroll offset so clicks map to the right row.
+    app.table_offset = state.offset();
 }
 
 fn row_chips(row: &PortRow) -> String {
@@ -792,11 +807,11 @@ fn details_items(items: &mut Vec<ListItem>, row: &PortRow, state_manager: &State
         let dir = state_manager.get_run_dir();
         items.push(ListItem::new(format!(
             "stdout={}",
-            dir.join(format!("{}.out.log", runa.name)).display()
+            log_path(&dir, &runa.name, "out").display()
         )));
         items.push(ListItem::new(format!(
             "stderr={}",
-            dir.join(format!("{}.err.log", runa.name)).display()
+            log_path(&dir, &runa.name, "err").display()
         )));
     } else {
         items.push(ListItem::new("runa=-"));
@@ -810,7 +825,7 @@ fn log_items(items: &mut Vec<ListItem>, row: &PortRow, state_manager: &StateMana
     };
     let dir = state_manager.get_run_dir();
     for label in ["out", "err"] {
-        let path = dir.join(format!("{}.{}.log", runa.name, label));
+        let path = log_path(&dir, &runa.name, label);
         items.push(ListItem::new(format!("--- {} ---", path.display())));
         match fs::read_to_string(&path) {
             Ok(content) => {

@@ -1,6 +1,4 @@
-use crate::state::{ProcessMetadata, ProcessStatus, StateManager};
-use nix::sys::signal;
-use nix::unistd::Pid;
+use crate::state::{ProcessMetadata, ProcessStatus, StateManager, is_runa_supervisor};
 use std::collections::{HashMap, HashSet};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -104,7 +102,13 @@ pub fn collect_snapshot(state_manager: &StateManager, include_udp: bool) -> Port
     }
 
     let entries = collapse_duplicate_bindings(entries);
-    let processes = state_manager.list_processes().unwrap_or_default();
+    // Ignore stale state files whose PIDs may have been reused by other processes.
+    let processes: Vec<_> = state_manager
+        .list_processes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| is_runa_supervisor(p.pid))
+        .collect();
     let pid_map = build_runa_pid_map(&processes);
     let conflict_counts = build_conflict_counts(&entries);
 
@@ -430,10 +434,6 @@ fn process_group_members(pgid: i32) -> Vec<i32> {
         .lines()
         .filter_map(|line| line.parse::<i32>().ok())
         .collect()
-}
-
-pub fn is_process_alive(pid: i32) -> bool {
-    pid > 1 && signal::kill(Pid::from_raw(pid), None).is_ok()
 }
 
 #[cfg(test)]

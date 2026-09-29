@@ -35,26 +35,45 @@ fn main() -> Result<()> {
                 let _ = nix::unistd::setsid();
             }
 
+            if let Some(bad) = env.iter().find(|e| !e.contains('=')) {
+                anyhow::bail!("Invalid environment variable '{}': expected KEY=VALUE", bad);
+            }
+
             if detach {
+                // The background supervisor's stderr goes to /dev/null, so
+                // report an already-running name here where the user sees it.
+                let state_manager =
+                    StateManager::new().context("Failed to initialize state manager")?;
+                if let Ok(existing) = state_manager.get_process(&name)
+                    && state::is_runa_supervisor(existing.pid)
+                {
+                    anyhow::bail!(
+                        "Process '{}' is already running (PID: {})",
+                        name,
+                        existing.pid
+                    );
+                }
+
                 let exe =
                     std::env::current_exe().context("Failed to get current executable path")?;
                 let mut command = std::process::Command::new(exe);
+                // Use --flag=value so values starting with '-' aren't parsed as flags.
                 command
                     .arg("run")
-                    .arg("--name")
-                    .arg(&name)
-                    .arg("--cmd")
-                    .arg(&cmd)
-                    .arg("--restart")
-                    .arg(match restart {
-                        cli::RestartPolicy::Always => "always",
-                        cli::RestartPolicy::OnFailure => "on-failure",
-                        cli::RestartPolicy::Never => "never",
-                    })
+                    .arg(format!("--name={}", name))
+                    .arg(format!("--cmd={}", cmd))
+                    .arg(format!(
+                        "--restart={}",
+                        match restart {
+                            cli::RestartPolicy::Always => "always",
+                            cli::RestartPolicy::OnFailure => "on-failure",
+                            cli::RestartPolicy::Never => "never",
+                        }
+                    ))
                     .arg("--internal-supervisor");
 
                 for e in &env {
-                    command.arg("--env").arg(e);
+                    command.arg(format!("--env={}", e));
                 }
 
                 // Redirect to avoid keeping terminal open
@@ -88,7 +107,7 @@ fn main() -> Result<()> {
                             continue;
                         }
 
-                        if signal::kill(Pid::from_raw(p.pid), None).is_ok() {
+                        if state::is_runa_supervisor(p.pid) {
                             println!("Stopping process '{}' (PID: {})...", p.name, p.pid);
                             let _ = signal::kill(Pid::from_raw(p.pid), Signal::SIGTERM);
                         } else {
@@ -109,7 +128,7 @@ fn main() -> Result<()> {
                     anyhow::bail!("Invalid PID {} for process '{}'", meta.pid, name);
                 }
 
-                if signal::kill(Pid::from_raw(meta.pid), None).is_ok() {
+                if state::is_runa_supervisor(meta.pid) {
                     println!("Stopping process '{}' (PID: {})...", name, meta.pid);
                     signal::kill(Pid::from_raw(meta.pid), Signal::SIGTERM)
                         .context("Failed to send SIGTERM")?;
@@ -132,7 +151,7 @@ fn main() -> Result<()> {
             let meta = state_manager
                 .get_process(&name)
                 .context(format!("Process '{}' not found", name))?;
-            if meta.pid > 1 && signal::kill(Pid::from_raw(meta.pid), None).is_ok() {
+            if state::is_runa_supervisor(meta.pid) {
                 println!("Restarting process '{}' (PID: {})...", name, meta.pid);
                 signal::kill(Pid::from_raw(meta.pid), Signal::SIGHUP)
                     .context("Failed to send SIGHUP")?;
@@ -151,18 +170,20 @@ fn main() -> Result<()> {
                     StateManager::new().context("Failed to initialize state manager")?;
                 let run_dir = state_manager.get_run_dir();
 
-                let stdout_path = run_dir.join(format!("{}.out.log", name));
-                let stderr_path = run_dir.join(format!("{}.err.log", name));
+                let stdout_path = logs::log_path(&run_dir, &name, "out");
+                let stderr_path = logs::log_path(&run_dir, &name, "err");
 
                 if !stdout_path.exists() && !stderr_path.exists() {
                     anyhow::bail!("No log files found for process '{}'", name);
                 }
 
                 if follow {
-                    println!("Following stdout for '{}'...", name);
-                    LogHandler::tail_logs(stdout_path)
-                        .await
-                        .context("Failed to tail logs")?;
+                    println!("Following stdout and stderr for '{}'...", name);
+                    tokio::try_join!(
+                        LogHandler::tail_logs(stdout_path),
+                        LogHandler::tail_logs(stderr_path)
+                    )
+                    .context("Failed to tail logs")?;
                 } else {
                     println!("--- stdout ---");
                     if stdout_path.exists() {
@@ -213,7 +234,7 @@ fn main() -> Result<()> {
                     "NAME", "PID", "STATUS", "PORT", "STARTED", "CMD"
                 );
                 for p in processes {
-                    let alive = ports::is_process_alive(p.pid);
+                    let alive = state::is_runa_supervisor(p.pid);
                     let status_str = if alive { "Running" } else { "Dead" };
                     let mut process_ports = runa_ports.remove(&p.name).unwrap_or_default();
                     process_ports.sort();

@@ -1,32 +1,38 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::error::Result;
+use crate::state::sanitize_process_name;
 
 const LOG_SIZE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10MB
+
+/// Path of a process log file. `stream` is "out" or "err". The name is
+/// sanitized the same way as state files so it can never escape `log_dir`.
+pub fn log_path(log_dir: &Path, name: &str, stream: &str) -> PathBuf {
+    log_dir.join(format!("{}.{}.log", sanitize_process_name(name), stream))
+}
 
 pub struct LogHandler;
 
 impl LogHandler {
     pub fn clear_logs(prefix: &str, log_dir: PathBuf) {
-        let stdout_path = log_dir.join(format!("{}.out.log", prefix));
-        let stderr_path = log_dir.join(format!("{}.err.log", prefix));
-        let _ = std::fs::remove_file(stdout_path);
-        let _ = std::fs::remove_file(stderr_path);
-
-        // Also remove rotation files
-        let _ = std::fs::remove_file(log_dir.join(format!("{}.out.log.bak", prefix)));
-        let _ = std::fs::remove_file(log_dir.join(format!("{}.err.log.bak", prefix)));
+        for stream in ["out", "err"] {
+            let path = log_path(&log_dir, prefix, stream);
+            let _ = std::fs::remove_file(&path);
+            // Also remove rotation files
+            let _ = std::fs::remove_file(path.with_extension("log.bak"));
+        }
     }
 
-    pub fn stream_stdout(stdout: ChildStdout, prefix: String, log_dir: PathBuf) {
+    pub fn stream_stdout(stdout: ChildStdout, prefix: String, log_dir: PathBuf) -> JoinHandle<()> {
+        let log_file_path = log_path(&log_dir, &prefix, "out");
         let prefix = Arc::new(prefix);
-        let log_file_path = log_dir.join(format!("{}.out.log", prefix));
 
         tokio::spawn(async move {
             let mut file = Self::open_log_file(&log_file_path).await;
@@ -54,12 +60,12 @@ impl LogHandler {
                     }
                 }
             }
-        });
+        })
     }
 
-    pub fn stream_stderr(stderr: ChildStderr, prefix: String, log_dir: PathBuf) {
+    pub fn stream_stderr(stderr: ChildStderr, prefix: String, log_dir: PathBuf) -> JoinHandle<()> {
+        let log_file_path = log_path(&log_dir, &prefix, "err");
         let prefix = Arc::new(prefix);
-        let log_file_path = log_dir.join(format!("{}.err.log", prefix));
 
         tokio::spawn(async move {
             let mut file = Self::open_log_file(&log_file_path).await;
@@ -87,7 +93,7 @@ impl LogHandler {
                     }
                 }
             }
-        });
+        })
     }
 
     async fn open_log_file(path: &PathBuf) -> Option<File> {
@@ -111,30 +117,27 @@ impl LogHandler {
             return Ok(());
         }
 
-        // Print existing content
-        let content = tokio::fs::read_to_string(&path).await?;
-        print!("{}", content);
-        let mut pos = content.len() as u64;
-
-        // Follow
+        // Print existing content, then follow. `pos` advances by exactly the
+        // bytes printed so data appended mid-read is never printed twice.
+        let mut pos = 0u64;
         loop {
-            let metadata = tokio::fs::metadata(&path).await?;
-            let len = metadata.len();
-
-            if len > pos {
-                let mut file = File::open(&path).await?;
-                file.seek(std::io::SeekFrom::Start(pos)).await?;
-
-                let mut reader = BufReader::new(file);
-                let mut line = String::new();
-                while reader.read_line(&mut line).await? > 0 {
-                    print!("{}", line);
-                    line.clear();
+            // A missing file means it is mid-rotation; retry on the next tick.
+            if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                let len = metadata.len();
+                if len < pos {
+                    // File truncated or rotated
+                    pos = 0;
                 }
-                pos = len;
-            } else if len < pos {
-                // File truncated or rotated
-                pos = 0;
+                if len > pos {
+                    let mut file = File::open(&path).await?;
+                    file.seek(std::io::SeekFrom::Start(pos)).await?;
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await?;
+                    pos += buf.len() as u64;
+                    print!("{}", String::from_utf8_lossy(&buf));
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                }
             }
 
             sleep(Duration::from_millis(500)).await;
