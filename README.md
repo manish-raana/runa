@@ -20,7 +20,7 @@ Think PM2, without the Node.js runtime or the config files.
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 
-[Install](#install) · [Quick start](#quick-start) · [Commands](#commands) · [Port dashboard](#port-dashboard) · [How it works](#how-it-works)
+[Install](#install) · [Quick start](#quick-start) · [Commands](#commands) · [Port dashboard](#port-dashboard) · [Metrics](#metrics) · [Menubar app](#macos-menubar-app) · [How it works](#how-it-works)
 
 </div>
 
@@ -43,7 +43,10 @@ worker               87102      Running    -               2026-09-29 10:41:02  
 - **Restarts crashed processes.** Choose `always`, `on-failure` or `never`. Retries back off exponentially, so a crash loop doesn't peg your CPU.
 - **Shuts down cleanly.** It sends `SIGTERM` to the whole process group, waits up to 5 seconds, then sends `SIGKILL`. Grandchild processes don't get left behind.
 - **Shows your ports.** `runa status` lists the ports each process is listening on. `runa watch` opens a live dashboard of every listening port on your machine.
+- **Tracks CPU and memory.** Each process's CPU, memory and crash history is sampled in the background. `runa metrics` shows the last hour.
+- **Knows your projects.** Every listening port is tagged with its project folder and git branch, even for servers Runa didn't start.
 - **Keeps timestamped logs.** stdout and stderr are saved separately, rotate at 10 MB, and can be followed live.
+- **Lives in your menubar.** On macOS, the optional Runa app shows your processes and dev servers one click away.
 - **One small binary.** No runtime to install and no background daemon. Each process gets its own lightweight supervisor.
 
 ## Install
@@ -106,7 +109,7 @@ $ runa status --json | jq '.[] | {name, status, ports, restarts}'
 }
 ```
 
-Each object has these fields: `name`, `running`, `status` (`running`, `failed` or `dead`), `pid`, `child_pid`, `cmd`, `cwd`, `ports`, `restarts`, `last_exit_code`, `last_error` and `started_at` (RFC 3339). When nothing is tracked, the output is `[]`.
+Each object has these fields: `name`, `running`, `status` (`running`, `failed` or `dead`), `pid`, `child_pid`, `cmd`, `cwd`, `ports`, `restarts`, `last_exit_code`, `last_error`, `cpu` (percent of one core), `rss_kb`, `project` (see [Ports and projects](#ports-and-projects)) and `started_at` (RFC 3339). `cpu` and `rss_kb` cover the whole process group and are `null` until the first sample, a few seconds after start. When nothing is tracked, the output is `[]`.
 
 ## Project files (`runa.toml`)
 
@@ -167,6 +170,8 @@ Each process gets your shell's environment, then the `env_file` variables, then 
 | `runa stop <name>` | Gracefully stop the process |
 | `runa stop --all` | Stop every tracked process |
 | `runa flush <name>` | Delete a process's log files |
+| `runa ports [--all] [--udp] [--json]` | List the ports of runa processes and dev servers. `--all` adds system services, app helpers and random high ports. |
+| `runa metrics <name> [--since SECS] [--json]` | Show CPU, memory and start/exit history for a process |
 | `runa watch` | Open the live port dashboard |
 | `runa save` | Remember the running processes |
 | `runa resurrect` | Start the saved processes again |
@@ -272,6 +277,57 @@ runa watch --interval 500  # refresh every 500ms (minimum 250ms)
 | <kbd>q</kbd> | Quit |
 
 The mouse works too: click a row to select it, scroll to move, and click the action buttons. Every destructive action asks for confirmation first (<kbd>y</kbd>/<kbd>Enter</kbd> to confirm, <kbd>n</kbd>/<kbd>Esc</kbd> to cancel).
+
+### Ports and projects
+
+`runa ports` lists the ports of Runa processes and of dev servers you started yourself, tagged with their project:
+
+```console
+$ runa ports
+PROTO  PORT    ADDRESS          PID      COMMAND              KIND       PROJECT                  RUNA
+TCP    3000    0.0.0.0          46127    node                 dev        shop/web@main            -
+TCP    8000    127.0.0.1        51230    Python               runa       api@feature/auth         api
+```
+
+In `runa ports --json`, each port has a `kind`: `runa`, `dev` (something you started: a dev server, database or container port), `ephemeral` (a helper on a random port at 49152 or above), `app` (inside a GUI `.app` bundle) or `system` (a macOS service, or a `root` or `_service` user's process). Without `--all`, only `runa` and `dev` ports are listed.
+
+Each port and each process in `runa status --json` also has a `project`, detected from the process's working directory, even for servers runa didn't start: `{name, sub, root, branch}`. `name` is the project folder (the nearest git root), `sub` is the monorepo package the process runs in (named from its `package.json`, `Cargo.toml`, `pyproject.toml` or `go.mod`), and `branch` is read from `.git/HEAD`. Processes running from `/`, your home folder, app bundles or hidden tool folders get no project.
+
+## Metrics
+
+Each supervisor samples its process group's CPU and memory every 5 seconds and records lifecycle events: starts, exits (with the exit code), restarts and stops.
+
+```console
+$ runa metrics api
+120 samples over 595s
+CPU     now    2.1%   avg    3.4%   peak   41.0%
+Memory  now 182.3 MB   avg 176.0 MB   peak 201.5 MB
+Procs   3
+
+Events:
+  2026-10-01 13:13:21  start    pid 33518
+  2026-10-01 13:18:02  exit     exit code 1
+  2026-10-01 13:18:03  start    pid 33702
+```
+
+- History is kept in `~/.runa/metrics/<name>.samples.jsonl` and `<name>.events.jsonl`: the last hour of samples and the last 200 events. Both are cleared when the process is started with `runa run`, like its logs.
+- `--json` prints `{name, interval_secs, samples: [{t, cpu, rss_kb, procs}], events: [{t, event, pid?, code?}]}`, with `t` in Unix seconds.
+
+## macOS menubar app
+
+`macos/` contains **Runa**, a native menubar app for macOS 14 and later. On macOS 26 it uses Liquid Glass.
+
+- **At a glance:** the menubar icon shows how many processes are running and how many dev ports are listening. A dot appears on the icon when a process is down.
+- **Processes:** status, project and branch, ports, CPU and memory. Click a port to open it in the browser, hover to restart or stop, and right-click to reveal the project in Finder.
+- **Details:** CPU and memory charts for the last hour, an activity timeline of starts, exits and restarts, and recent logs.
+- **Dev servers:** other servers listening on your machine, tagged with their project, with a button to stop them. **Show all** adds system services and app helpers.
+
+```bash
+macos/scripts/bundle.sh          # builds macos/build/Runa.app
+open macos/build/Runa.app
+```
+
+Building it needs Xcode or the Command Line Tools. The app drives the `runa` CLI (0.4.0 or later), which it looks for in `/opt/homebrew/bin`, `/usr/local/bin`, `~/.cargo/bin` and your shell's `PATH`. To start it at login, add `Runa.app` under **System Settings › General › Login Items**.
 
 ## Use with AI agents
 
