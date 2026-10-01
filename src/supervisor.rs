@@ -1,9 +1,12 @@
 use crate::cli::RestartPolicy;
 use crate::error::Result;
 use crate::logs::LogHandler;
+use crate::metrics::{self, Event, EventKind, JsonlLog};
 use crate::process::ProcessManager;
 use crate::state::{ProcessMetadata, ProcessStatus, StateManager};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Child;
 use tokio::signal;
@@ -63,6 +66,10 @@ impl Supervisor {
         let mut last_exit_code = None;
         let mut last_exit_at = None;
         let mut logs_cleared = false;
+        // Set once this supervisor has claimed the name (see below).
+        let mut events: Option<JsonlLog> = None;
+        let mut _sampler: Option<AbortOnDrop> = None;
+        let current_child = Arc::new(AtomicI32::new(0));
         let mut env_args: Vec<String> = self
             .env_vars
             .iter()
@@ -95,7 +102,13 @@ impl Supervisor {
             // happen after save_process has claimed the name, otherwise a
             // rejected duplicate start would wipe the running process's logs.
             if !logs_cleared {
-                LogHandler::clear_logs(&self.name, self.state_manager.get_run_dir());
+                let run_dir = self.state_manager.get_run_dir();
+                LogHandler::clear_logs(&self.name, run_dir.clone());
+                events = Some(metrics::event_log(&run_dir, &self.name));
+                _sampler = Some(AbortOnDrop(tokio::spawn(metrics::sample_loop(
+                    metrics::sample_log(&run_dir, &self.name),
+                    current_child.clone(),
+                ))));
                 logs_cleared = true;
             }
 
@@ -114,7 +127,12 @@ impl Supervisor {
             if let Some(child_pid) = child.id() {
                 meta.child_pid = Some(child_pid as i32);
                 let _ = self.state_manager.save_process(&meta);
+                current_child.store(child_pid as i32, Ordering::Relaxed);
             }
+            record(
+                &mut events,
+                Event::new(EventKind::Start, meta.child_pid, None),
+            );
 
             // Setup logging
             let log_dir = self.state_manager.get_run_dir();
@@ -144,6 +162,7 @@ impl Supervisor {
                     info!(name = %self.name, "Received Ctrl+C, shutting down gracefully...");
                     self.graceful_shutdown(child).await;
                     drain_log_tasks(log_tasks).await;
+                    record(&mut events, Event::new(EventKind::Stop, None, None));
                     self.cleanup()?;
                     return Ok(());
                 }
@@ -151,11 +170,14 @@ impl Supervisor {
                     info!(name = %self.name, "Received SIGTERM, shutting down gracefully...");
                     self.graceful_shutdown(child).await;
                     drain_log_tasks(log_tasks).await;
+                    record(&mut events, Event::new(EventKind::Stop, None, None));
                     self.cleanup()?;
                     return Ok(());
                 }
                 _ = sighup.recv() => {
                     info!(name = %self.name, "Received SIGHUP, restarting process...");
+                    current_child.store(0, Ordering::Relaxed);
+                    record(&mut events, Event::new(EventKind::Restart, None, None));
                     self.graceful_shutdown(child).await;
                     drain_log_tasks(log_tasks).await;
                     // Loop will continue and restart process
@@ -163,6 +185,7 @@ impl Supervisor {
                 }
             };
             drain_log_tasks(log_tasks).await;
+            current_child.store(0, Ordering::Relaxed);
 
             // Process exited
             if status.success() {
@@ -173,6 +196,10 @@ impl Supervisor {
             last_exit_code = status.code();
             last_exit_at = Some(unix_now());
             self.update_exit_metadata(last_exit_code, last_exit_at.unwrap())?;
+            record(
+                &mut events,
+                Event::new(EventKind::Exit, None, last_exit_code),
+            );
 
             let should_restart = match self.restart_policy {
                 RestartPolicy::Always => true,
@@ -199,11 +226,13 @@ impl Supervisor {
                 _ = sleep(restart_delay) => {}
                 _ = sigint.recv() => {
                     info!(name = %self.name, "Received Ctrl+C during restart delay, shutting down...");
+                    record(&mut events, Event::new(EventKind::Stop, None, None));
                     self.cleanup()?;
                     return Ok(());
                 }
                 _ = sigterm.recv() => {
                     info!(name = %self.name, "Received SIGTERM during restart delay, shutting down...");
+                    record(&mut events, Event::new(EventKind::Stop, None, None));
                     self.cleanup()?;
                     return Ok(());
                 }
@@ -279,6 +308,21 @@ impl Supervisor {
     fn cleanup(&self) -> Result<()> {
         info!(name = %self.name, "Cleaning up process state...");
         self.state_manager.remove_process(&self.name)
+    }
+}
+
+fn record(events: &mut Option<JsonlLog>, event: Event) {
+    if let Some(log) = events {
+        log.append(&event);
+    }
+}
+
+/// Stops the metrics sampler on every way out of `Supervisor::run`.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

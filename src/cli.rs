@@ -92,6 +92,36 @@ pub enum Commands {
         json: bool,
     },
 
+    /// List listening ports of runa processes and dev servers
+    Ports {
+        /// Include UDP sockets
+        #[arg(long)]
+        udp: bool,
+
+        /// Also include system services, app helpers and random high ports
+        #[arg(long, short = 'a')]
+        all: bool,
+
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show CPU, memory and lifecycle history for a process
+    Metrics {
+        /// Name of the process
+        #[arg(index = 1)]
+        name: String,
+
+        /// Only include the last N seconds (default: all, up to one hour)
+        #[arg(long)]
+        since: Option<u64>,
+
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Start the processes defined in runa.toml
     Up {
         /// Processes to start (default: all)

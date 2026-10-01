@@ -85,6 +85,154 @@ impl PortSnapshot {
     }
 }
 
+/// Who a listening socket belongs to, so UIs can hide machine noise.
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PortKind {
+    /// Owned by a runa process.
+    Runa,
+    /// Something you started: a dev server, database or container port.
+    Dev,
+    /// A helper on a random high port, e.g. a headless browser or debugger.
+    Ephemeral,
+    /// Part of a GUI app bundle (editor helpers, chat apps, ...).
+    App,
+    /// A macOS or system service, or another user's process.
+    System,
+}
+
+impl PortKind {
+    /// Shown by default: runa processes and things you started.
+    pub fn is_dev(self) -> bool {
+        matches!(self, Self::Runa | Self::Dev)
+    }
+}
+
+/// Start of the IANA dynamic range, where the OS hands out random ports.
+const EPHEMERAL_PORT_START: u16 = 49152;
+
+const SYSTEM_PREFIXES: &[&str] = &[
+    "/System/",
+    "/usr/libexec/",
+    "/usr/sbin/",
+    "/sbin/",
+    "/Library/Apple/",
+];
+
+/// App bundles whose listeners are your containers' published ports.
+const CONTAINER_APPS: &[&str] = &[
+    "/Docker.app/",
+    "/OrbStack.app/",
+    "/Rancher Desktop.app/",
+    "/Podman Desktop.app/",
+];
+
+pub fn classify(port: u16, user: &str, exe: Option<&str>, is_runa: bool) -> PortKind {
+    if is_runa {
+        return PortKind::Runa;
+    }
+    if user == "root" || user.starts_with('_') {
+        return PortKind::System;
+    }
+    if let Some(exe) = exe {
+        if SYSTEM_PREFIXES.iter().any(|prefix| exe.starts_with(prefix)) {
+            return PortKind::System;
+        }
+        // Only installed apps count: Python, Electron and others run dev
+        // servers from bundles elsewhere (Python.framework/.../Python.app).
+        let installed_app = exe.starts_with("/Applications/") || exe.contains("/Applications/");
+        let container = CONTAINER_APPS.iter().any(|app| exe.contains(app));
+        // Xcode's toolchain (python3, ...) lives inside Xcode.app.
+        let toolchain = exe.contains(".app/Contents/Developer/");
+        if installed_app && exe.contains(".app/Contents/") && !container && !toolchain {
+            return PortKind::App;
+        }
+    }
+    if port >= EPHEMERAL_PORT_START {
+        return PortKind::Ephemeral;
+    }
+    PortKind::Dev
+}
+
+/// Executable paths for `pids`, where the OS reports them.
+pub fn executable_paths(pids: &[i32]) -> HashMap<i32, String> {
+    let mut paths = HashMap::new();
+    let mut missing = Vec::new();
+    for &pid in pids {
+        // Linux: ps only prints short names, but /proc has the full path.
+        match std::fs::read_link(format!("/proc/{pid}/exe")) {
+            Ok(path) => {
+                paths.insert(pid, path.display().to_string());
+            }
+            Err(_) => missing.push(pid.to_string()),
+        }
+    }
+    if missing.is_empty() {
+        return paths;
+    }
+    // macOS: `comm` is the full executable path.
+    let list = missing.join(",");
+    if let Ok(output) =
+        run_command_with_timeout("ps", &["-o", "pid=,comm=", "-p", &list], COMMAND_TIMEOUT)
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let line = line.trim_start();
+            if let Some((pid, comm)) = line.split_once(char::is_whitespace)
+                && let Ok(pid) = pid.parse()
+            {
+                paths.insert(pid, comm.trim().to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// One listening socket, as printed by `runa ports --json`.
+#[derive(serde::Serialize)]
+pub struct PortJson {
+    pub protocol: &'static str,
+    pub address: String,
+    pub port: u16,
+    pub pid: i32,
+    pub command: String,
+    pub user: String,
+    /// The process's executable, if known.
+    pub exe: Option<String>,
+    pub kind: PortKind,
+    /// The process's working directory, if known.
+    pub cwd: Option<String>,
+    /// The project that directory belongs to.
+    pub project: Option<crate::workspace::Workspace>,
+    /// The runa process that owns the socket, if any.
+    pub runa: Option<String>,
+    /// More than one process listens on this port.
+    pub conflict: bool,
+}
+
+impl PortJson {
+    pub fn new(row: &PortRow, exe: Option<&String>) -> Self {
+        Self {
+            protocol: row.entry.protocol.as_str(),
+            address: row.entry.address.clone(),
+            port: row.entry.port,
+            pid: row.entry.pid,
+            command: row.entry.command.clone(),
+            user: row.entry.user.clone(),
+            exe: exe.cloned(),
+            kind: classify(
+                row.entry.port,
+                &row.entry.user,
+                exe.map(String::as_str),
+                row.runa.is_some(),
+            ),
+            cwd: None,
+            project: None,
+            runa: row.runa.as_ref().map(|r| r.name.clone()),
+            conflict: row.conflict_count > 1,
+        }
+    }
+}
+
 pub fn collect_snapshot(state_manager: &StateManager, include_udp: bool) -> PortSnapshot {
     let mut errors = Vec::new();
     let mut entries = Vec::new();
@@ -450,6 +598,99 @@ mod tests {
             user: "manish".to_string(),
             source: "system".to_string(),
         }
+    }
+
+    #[test]
+    fn classifies_listeners() {
+        let kind = |port, user, exe| classify(port, user, exe, false);
+
+        assert_eq!(classify(56000, "me", None, true), PortKind::Runa);
+        assert_eq!(
+            kind(3000, "me", Some("/opt/homebrew/bin/node")),
+            PortKind::Dev
+        );
+        assert_eq!(
+            kind(
+                7000,
+                "me",
+                Some("/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter")
+            ),
+            PortKind::System
+        );
+        assert_eq!(
+            kind(64330, "me", Some("/usr/libexec/rapportd")),
+            PortKind::System
+        );
+        assert_eq!(kind(5432, "_postgres", None), PortKind::System);
+        assert_eq!(
+            kind(
+                41016,
+                "me",
+                Some(
+                    "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper"
+                )
+            ),
+            PortKind::App
+        );
+        assert_eq!(
+            kind(
+                5432,
+                "me",
+                Some("/Applications/Docker.app/Contents/MacOS/com.docker.backend")
+            ),
+            PortKind::Dev
+        );
+        assert_eq!(
+            kind(
+                8000,
+                "me",
+                Some("/Applications/Xcode.app/Contents/Developer/usr/bin/python3")
+            ),
+            PortKind::Dev
+        );
+        assert_eq!(
+            kind(
+                62757,
+                "me",
+                Some("/Users/me/app/node_modules/chrome-headless-shell")
+            ),
+            PortKind::Ephemeral
+        );
+        assert_eq!(
+            kind(
+                8000,
+                "me",
+                Some(
+                    "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+                )
+            ),
+            PortKind::Dev
+        );
+        assert_eq!(
+            kind(
+                8000,
+                "me",
+                Some(
+                    "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python"
+                )
+            ),
+            PortKind::Dev
+        );
+        assert_eq!(
+            kind(
+                5173,
+                "me",
+                Some(
+                    "/Users/me/app/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+                )
+            ),
+            PortKind::Dev
+        );
+        // Renamed process titles are not paths: fall back to the port.
+        assert_eq!(
+            kind(3000, "me", Some("next-server (v16.3.6)")),
+            PortKind::Dev
+        );
     }
 
     #[test]

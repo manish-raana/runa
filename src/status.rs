@@ -1,5 +1,7 @@
+use crate::metrics;
 use crate::ports;
 use crate::state::{self, StateManager};
+use crate::workspace::{self, Workspace};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 
@@ -14,10 +16,16 @@ pub struct StatusRow {
     pub child_pid: Option<i32>,
     pub cmd: String,
     pub cwd: Option<String>,
+    /// The project `cwd` belongs to.
+    pub project: Option<Workspace>,
     pub ports: Vec<u16>,
     pub restarts: u64,
     pub last_exit_code: Option<i32>,
     pub last_error: Option<String>,
+    /// CPU use of the process group in percent of one core, if sampled recently.
+    pub cpu: Option<f64>,
+    /// Resident memory of the process group in KiB, if sampled recently.
+    pub rss_kb: Option<u64>,
     pub started_at: String,
     #[serde(skip)]
     pub started_local: chrono::DateTime<chrono::Local>,
@@ -40,6 +48,8 @@ pub fn collect_status_rows(state_manager: &StateManager) -> Result<Vec<StatusRow
         }
     }
 
+    let run_dir = state_manager.get_run_dir();
+    let home = workspace::home_dir();
     Ok(processes
         .into_iter()
         .map(|p| {
@@ -54,6 +64,9 @@ pub fn collect_status_rows(state_manager: &StateManager) -> Result<Vec<StatusRow
             ports.dedup();
             let started_local: chrono::DateTime<chrono::Local> =
                 (std::time::UNIX_EPOCH + std::time::Duration::from_secs(p.created_at)).into();
+            let sample = running
+                .then(|| metrics::current_sample(&run_dir, &p.name))
+                .flatten();
 
             StatusRow {
                 name: p.name,
@@ -62,11 +75,17 @@ pub fn collect_status_rows(state_manager: &StateManager) -> Result<Vec<StatusRow
                 pid: p.pid,
                 child_pid: p.child_pid,
                 cmd: p.cmd,
+                project: p
+                    .cwd
+                    .as_deref()
+                    .and_then(|cwd| workspace::detect(std::path::Path::new(cwd), &home)),
                 cwd: p.cwd,
                 ports,
                 restarts: p.restart_count,
                 last_exit_code: p.last_exit_code,
                 last_error: p.last_error,
+                cpu: sample.as_ref().map(|s| s.cpu),
+                rss_kb: sample.as_ref().map(|s| s.rss_kb),
                 started_at: started_local.to_rfc3339(),
                 started_local,
             }
